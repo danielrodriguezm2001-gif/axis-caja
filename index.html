@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow" />
+<meta name="theme-color" content="#12211B" />
+<title>Caja de Axis</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap');
+  html, body { margin: 0; padding: 0; background: #F2F4F3; color: #12211B; font-family: 'Barlow', system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  .axis-display { font-family: 'Barlow Condensed', 'Barlow', sans-serif; letter-spacing: .02em; }
+  .axis-btn { border: none; border-radius: 8px; padding: 9px 14px; font: 600 13px 'Barlow', sans-serif; cursor: pointer; }
+  .axis-btn:focus-visible { outline: 2px solid #2563EB; outline-offset: 2px; }
+  .axis-btn.primary { background: #12211B; color: #fff; }
+  .axis-btn.ghost { background: #fff; color: #12211B; border: 1px solid #C9D2CD; }
+  .axis-btn:disabled { opacity: .45; cursor: not-allowed; }
+  input, select, textarea { font-family: 'Barlow', sans-serif; }
+  .axis-input { border: 1px solid #C9D2CD; border-radius: 6px; padding: 7px 9px; font-size: 13px; background: #fff; width: 100%; }
+  @media (max-width: 640px) { .axis-input { font-size: 16px; } } /* evita el zoom al escribir en el móvil */
+</style>
+</head>
+<body>
+<div id="root">
+  <p style="font-family: sans-serif; padding: 24px; color: #5A6B63;">Cargando la Caja…</p>
+</div>
+
+<!-- React 18 -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<!-- Supabase: base de datos, login y tiempo real -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="caja.js?v=1"></script>
+</body>
+</html>
