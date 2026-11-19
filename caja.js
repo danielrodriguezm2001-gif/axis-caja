@@ -67,6 +67,9 @@
     if (cache.current === null) { try { cache.current = JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch (e) { cache.current = {}; } }
     const [pagos, setPagos] = useState(() => cache.current.pagos || []);
     const [gastos, setGastos] = useState(() => cache.current.gastos || []);
+    const [conceptos, setConceptos] = useState(() => cache.current.conceptos || []);
+    const conceptosRef = useRef([]);
+    conceptosRef.current = conceptos;
     const [config, setConfig] = useState(() => cache.current.config || CONFIG_VACIA);
     const [clientes, setClientes] = useState([]);
     const [enVivo, setEnVivo] = useState(false);
@@ -87,15 +90,16 @@
           }
           return filas;
         };
-        const [p, c, g, cfg] = await Promise.all([leer("caja_pagos", { col: "fecha", asc: false }), leer("caja_clientes", { col: "nombre", asc: true }), leer("caja_gastos", { col: "fecha", asc: false }), sb.from("caja_config").select("*").eq("id", 1).maybeSingle()]);
+        const [p, c, g, cfg, cs] = await Promise.all([leer("caja_pagos", { col: "fecha", asc: false }), leer("caja_clientes", { col: "nombre", asc: true }), leer("caja_gastos", { col: "fecha", asc: false }), sb.from("caja_config").select("*").eq("id", 1).maybeSingle(), leer("caja_conceptos", { col: "nombre", asc: true })]);
         if (cfg.error) throw cfg.error;
         setPagos(p);
         setClientes(c);
         setGastos(g);
+        setConceptos(cs);
         setConfig(cfg.data || CONFIG_VACIA);
         setDesactualizado(false);
         setError("");
-        try { localStorage.setItem(CACHE_KEY, JSON.stringify({ pagos: p, gastos: g, config: cfg.data || CONFIG_VACIA })); } catch (e) { /* sin caché */ }
+        try { localStorage.setItem(CACHE_KEY, JSON.stringify({ pagos: p, gastos: g, config: cfg.data || CONFIG_VACIA, conceptos: cs })); } catch (e) { /* sin caché */ }
       } catch (e) {
         setDesactualizado(true);
         setError("No se han podido leer los pagos de la Caja (" + (e.message || e) + "). Se muestran los últimos guardados.");
@@ -131,6 +135,7 @@
           .on("postgres_changes", { event: "*", schema: "public", table: "caja_clientes" }, refrescar)
           .on("postgres_changes", { event: "*", schema: "public", table: "caja_gastos" }, refrescar)
           .on("postgres_changes", { event: "*", schema: "public", table: "caja_config" }, refrescar)
+          .on("postgres_changes", { event: "*", schema: "public", table: "caja_conceptos" }, refrescar)
           .subscribe((s) => { setEnVivo(s === "SUBSCRIBED"); if (s === "SUBSCRIBED") cargar(); });
       })();
       return () => { vivo = false; clearTimeout(temporizador); if (canal) sb.removeChannel(canal); setEnVivo(false); };
@@ -153,6 +158,12 @@
           cliente = data;
         }
         if (!cliente) throw new Error("Elige un cliente.");
+        const nombreConcepto = d.concepto.trim();
+        if (!conceptosRef.current.some((k) => k.nombre_norm === normName(nombreConcepto))) {
+          // Concepto nuevo: queda guardado (como manual) con este IVA y este importe como habituales.
+          const { error: e } = await sb.from("caja_conceptos").upsert({ nombre: nombreConcepto, nombre_norm: normName(nombreConcepto), precio_cents: Math.round(d.importe * 100), iva_rate: d.iva_rate, origen: "manual" }, { onConflict: "nombre_norm", ignoreDuplicates: true });
+          if (e) throw e;
+        }
         const c = calcIva(d.importe, d.iva_rate, d.incluye_iva);
         // Caja de efectivo: solo cobros, siempre en efectivo.
         const fila = { cliente_id: cliente.id, cliente_nombre: cliente.nombre, concepto: d.concepto.trim(), importe_cents: c.total, base_cents: c.base, iva_rate: d.iva_rate, iva_cents: c.iva, fecha: d.fecha, forma_pago: "efectivo", estado: "cobrado", vendedor: d.vendedor, sin_aimharder: !!d.sin_aimharder, notas: d.notas.trim(), updated_at: new Date().toISOString() };
@@ -180,13 +191,24 @@
         if (e) throw e;
         await cargar();
       },
+      async actualizarConcepto(id, cambios) {
+        if (!puedeEditar) throw new Error("Tu usuario solo puede ver la Caja.");
+        const { error: e } = await sb.from("caja_conceptos").update(cambios).eq("id", id);
+        if (e) throw e;
+        await cargar();
+      },
+      async borrarConcepto(id) {
+        const { error: e } = await sb.from("caja_conceptos").delete().eq("id", id);
+        if (e) throw e;
+        await cargar();
+      },
       async borrarPago(id) {
         const { error: e } = await sb.from("caja_pagos").delete().eq("id", id);
         if (e) throw e;
         await cargar();
       },
     };
-    return { estado, error, sesion, rol, puedeEditar, esAdmin: rol === "admin", pagos, clientes, gastos, config, enVivo, desactualizado, api };
+    return { estado, error, sesion, rol, puedeEditar, esAdmin: rol === "admin", pagos, clientes, gastos, config, conceptos, enVivo, desactualizado, api };
   }
 
   /* ---------- pantalla ---------- */
@@ -220,20 +242,20 @@
 
   // Desplegable de clientes con buscador: se escribe parte del nombre (en cualquier
   // orden) y se elige de la lista. Si no existe, ofrece crearlo.
-  function SelectorCliente({ clientes, value, onChange }) {
+  function SelectorLista({ items, value, onChange, placeholder, nuevo, vacio }) {
     const [abierto, setAbierto] = useState(false);
     const [texto, setTexto] = useState("");
     const [activo, setActivo] = useState(0);
-    const id = useRef("cli-" + Math.random().toString(36).slice(2, 8)).current;
+    const id = useRef("sel-" + Math.random().toString(36).slice(2, 8)).current;
     const q = normName(texto);
     const coincidencias = useMemo(() => {
       const t = q.split(" ").filter(Boolean);
-      return clientes.filter((c) => t.every((x) => c.nombre_norm.includes(x)));
-    }, [clientes, q]);
+      return items.filter((c) => t.every((x) => c.nombre_norm.includes(x)));
+    }, [items, q]);
     const visibles = coincidencias.slice(0, 60);
-    const crear = texto.trim() && !clientes.some((c) => c.nombre_norm === q) ? texto.trim() : null;
-    const opciones = [...visibles.map((c) => ({ nombre: c.nombre, nuevo: false })), ...(crear ? [{ nombre: crear, nuevo: true }] : [])];
-    const elegir = (o) => { onChange(o.nombre); setTexto(""); setAbierto(false); };
+    const crear = texto.trim() && !items.some((c) => c.nombre_norm === q) ? texto.trim() : null;
+    const opciones = [...visibles.map((c) => ({ nombre: c.nombre, nuevo: false, item: c })), ...(crear ? [{ nombre: crear, nuevo: true, item: null }] : [])];
+    const elegir = (o) => { onChange(o.nombre, o.item); setTexto(""); setAbierto(false); };
     const teclas = (e) => {
       if (e.key === "ArrowDown") { e.preventDefault(); setAbierto(true); setActivo((a) => Math.min(a + 1, opciones.length - 1)); }
       else if (e.key === "ArrowUp") { e.preventDefault(); setActivo((a) => Math.max(a - 1, 0)); }
@@ -241,18 +263,18 @@
       else if (e.key === "Escape" || e.key === "Tab") setAbierto(false);
     };
     return h("div", { style: { position: "relative" } },
-      h("input", { className: "axis-input", role: "combobox", "aria-expanded": abierto, "aria-controls": id, "aria-autocomplete": "list", autoComplete: "off", placeholder: "Buscar cliente…",
+      h("input", { className: "axis-input", role: "combobox", "aria-expanded": abierto, "aria-controls": id, "aria-autocomplete": "list", autoComplete: "off", placeholder,
         value: abierto ? texto : value, style: value && !abierto ? { fontWeight: 600, paddingRight: 28 } : undefined,
         onFocus: () => { setTexto(""); setActivo(0); setAbierto(true); },
         onBlur: () => setAbierto(false),
         onChange: (e) => { setTexto(e.target.value); setActivo(0); setAbierto(true); },
         onKeyDown: teclas }),
-      value && !abierto && h("button", { type: "button", "aria-label": "Quitar cliente", onMouseDown: (e) => { e.preventDefault(); onChange(""); }, style: { position: "absolute", right: 4, top: 3, border: "none", background: "transparent", cursor: "pointer", fontSize: 16, color: MUTED } }, "×"),
+      value && !abierto && h("button", { type: "button", "aria-label": "Quitar selección", onMouseDown: (e) => { e.preventDefault(); onChange("", null); }, style: { position: "absolute", right: 4, top: 3, border: "none", background: "transparent", cursor: "pointer", fontSize: 16, color: MUTED } }, "×"),
       abierto && h("div", { id, role: "listbox", style: { position: "absolute", left: 0, right: 0, top: "100%", marginTop: 2, maxHeight: 240, overflowY: "auto", background: "#fff", border: `1px solid #C9D2CD`, borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,.12)", zIndex: 30 } },
-        opciones.length === 0 && h("div", { style: { padding: "8px 10px", fontSize: 13, color: MUTED } }, clientes.length ? "Sin resultados" : "Aún no hay clientes: escribe un nombre para crearlo"),
+        opciones.length === 0 && h("div", { style: { padding: "8px 10px", fontSize: 13, color: MUTED } }, items.length ? "Sin resultados" : vacio),
         opciones.map((o, i) => h("div", { key: (o.nuevo ? "nuevo:" : "") + o.nombre, role: "option", "aria-selected": i === activo,
           onMouseDown: (e) => { e.preventDefault(); elegir(o); }, onMouseEnter: () => setActivo(i),
-          style: { padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === activo ? SOFT : "#fff", borderTop: o.nuevo && visibles.length ? `1px solid ${LINE}` : "none", fontWeight: o.nuevo ? 600 : 400 } }, o.nuevo ? `+ Crear cliente «${o.nombre}»` : o.nombre)),
+          style: { padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === activo ? SOFT : "#fff", borderTop: o.nuevo && visibles.length ? `1px solid ${LINE}` : "none", fontWeight: o.nuevo ? 600 : 400 } }, o.nuevo ? nuevo(o.nombre) : o.nombre)),
         coincidencias.length > visibles.length && h("div", { style: { padding: "6px 10px", fontSize: 12, color: MUTED, borderTop: `1px solid ${LINE}` } }, `Mostrando ${visibles.length} de ${coincidencias.length}: sigue escribiendo para filtrar`)));
   }
 
@@ -281,6 +303,7 @@
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.cliente_nombre.trim() && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
     const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
+    const conceptoNuevo = f.concepto.trim() && !caja.conceptos.some((k) => k.nombre_norm === normName(f.concepto));
     const editar = (c) => {
       setEditId(c.id);
       setF({ fecha: c.fecha, cliente_nombre: c.cliente_nombre, concepto: c.concepto, importe: String(c.importe_cents / 100).replace(".", ","), iva_rate: Number(c.iva_rate), incluye_iva: true, vendedor: c.vendedor, sin_aimharder: c.sin_aimharder, notas: c.notas });
@@ -288,7 +311,6 @@
     };
     const delMes = caja.pagos.filter((c) => (c.fecha || "").startsWith(month)).sort((a, b) => b.fecha.localeCompare(a.fecha));
     const suma = (k) => delMes.reduce((a, c) => a + c[k], 0);
-    const conceptos = [...new Set(caja.pagos.map((c) => c.concepto))].sort();
     const fila = (c) => h("div", { key: c.id, style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13, padding: "8px 0", borderBottom: `1px solid ${SOFT}` } },
       h("span", { style: { color: MUTED, minWidth: 78 } }, c.fecha),
       h("b", { style: { flex: "1 1 180px" } }, c.concepto, c.cliente_nombre ? ` · ${c.cliente_nombre}` : "", c.notas ? h("span", { style: { fontWeight: 400, color: MUTED } }, ` — ${c.notas}`) : null),
@@ -303,18 +325,20 @@
     return h("div", { style: { display: "grid", gap: 18 } },
       caja.puedeEditar && h("section", { style: box },
         h("h2", { className: "axis-display", style: { margin: "0 0 6px", fontSize: 20, textTransform: "uppercase" } }, editId ? "Editar cobro" : "Registrar cobro"),
-        h("p", { style: { margin: "0 0 12px", fontSize: 13, color: MUTED } }, "Caja de efectivo: se apunta lo que se cobra, con el IVA que lleva. La fecha y el cliente sirven para emparejarlo con el pago de AimHarder (el de 0 €); el producto, tal y como figura allí."),
+        h("p", { style: { margin: "0 0 12px", fontSize: 13, color: MUTED } }, "Caja de efectivo: se apunta lo que se cobra, con el IVA que lleva. La fecha y el cliente sirven para emparejarlo con el pago de AimHarder (el de 0 €); el producto, de las tarifas de AimHarder. Para un cobro aparte, crea un concepto nuevo y se marcará como «no existe en AimHarder»."),
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 } },
           h("label", { style: lbl }, h("b", { style: { color: INK } }, "Fecha del cobro"), h("input", { type: "date", className: "axis-input", value: f.fecha, onChange: set("fecha") })),
-          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Cliente"), h(SelectorCliente, { clientes: caja.clientes, value: f.cliente_nombre, onChange: (v) => setF({ ...f, cliente_nombre: v }) })),
-          h("label", { style: lbl }, "Producto / concepto", h("input", { className: "axis-input", list: "caja-conceptos", value: f.concepto, onChange: set("concepto"), placeholder: "Ej. Bono 4 sesiones" })),
+          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Cliente"), h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) })),
+          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Producto / concepto"), h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar producto…", vacio: "Aún no hay conceptos: escribe uno para crearlo", nuevo: (t) => `+ Crear concepto «${t}»`,
+            // Al elegir una tarifa de AimHarder se rellenan su precio e IVA habituales; un concepto nuevo/manual no existe en AimHarder.
+            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, ...(v ? { sin_aimharder: !item || item.origen === "manual" } : {}), ...(item ? { iva_rate: Number(item.iva_rate), importe: item.precio_cents && !String(a.importe).trim() ? String(item.precio_cents / 100).replace(".", ",") : a.importe } : {}) })) })),
           h("label", { style: lbl }, h("b", { style: { color: INK } }, "Importe cobrado (€)"), h("input", { className: "axis-input", inputMode: "decimal", value: f.importe, onChange: set("importe"), placeholder: "0,00" })),
           campoIva(f, set),
           h("label", { style: lbl }, "Vendedor", h("select", { className: "axis-input", value: f.vendedor, onChange: set("vendedor") }, h("option", { value: "" }, "El que figure en AimHarder"), VENDEDORES.map((v) => h("option", { key: v, value: v }, v)))),
           h("label", { style: lbl }, "Notas (opcional)", h("input", { className: "axis-input", value: f.notas, onChange: set("notas") }))),
-        h("datalist", { id: "caja-conceptos" }, conceptos.map((c) => h("option", { key: c, value: c }))),
-        h("label", { style: { ...lbl, display: "flex", gap: 6, alignItems: "center", marginTop: 10 } }, h("input", { type: "checkbox", checked: f.sin_aimharder, onChange: set("sin_aimharder") }), "No existe en AimHarder (cuenta en la caja pero no cubre sesiones)"),
+        h("label", { style: { ...lbl, display: "flex", gap: 6, alignItems: "center", marginTop: 10 } }, h("input", { type: "checkbox", checked: f.sin_aimharder, onChange: set("sin_aimharder") }), "Cobro aparte, no existe en AimHarder (cuenta en la caja pero no cubre sesiones)"),
         calc && h("p", { style: { margin: "10px 0 0", fontSize: 13 } }, "Base ", h("b", null, eurC(calc.base)), " + IVA ", h("b", null, eurC(calc.iva)), " = total cobrado ", h("b", null, eurC(calc.total))),
+        conceptoNuevo && h("p", { style: { margin: "6px 0 0", fontSize: 12, color: MUTED } }, "Concepto nuevo: se guardará en la lista con este IVA y este importe como habituales."),
         h("div", { style: { marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" } },
           h("button", { className: "axis-btn primary", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar cobro"),
           editId && h("button", { className: "axis-btn ghost", onClick: () => { setEditId(null); setF(vacio()); } }, "Cancelar"),
@@ -324,7 +348,29 @@
           h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Cobrado en el mes"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("importe_cents"))), h("div", { style: { fontSize: 12, color: MUTED } }, `${delMes.length} cobro(s)`)),
           h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Base imponible"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("base_cents")))),
           h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "IVA repercutido"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("iva_cents"))))),
-        delMes.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))));
+        delMes.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))),
+      h("details", { style: box },
+        h("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: 14 } }, `Conceptos y tarifas (${caja.conceptos.length})`),
+        h("p", { style: { margin: "10px 0", fontSize: 13, color: MUTED } }, "Las tarifas vienen de AimHarder (precio más habitual, con IVA incluido). El precio se propone al elegir el concepto y el IVA se aplica por defecto: ajusta aquí el IVA de cada servicio. Los conceptos nuevos se crean desde el desplegable al registrar un cobro."),
+        caja.conceptos.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "Aún no hay conceptos.") : h("div", null, caja.conceptos.map((k) => h(FilaConcepto, { key: k.id + ":" + k.precio_cents + ":" + k.iva_rate, caja, k })))));
+  }
+
+  // Precio e IVA habituales de cada concepto (el IVA correcto depende del servicio: se ajusta aquí).
+  function FilaConcepto({ caja, k }) {
+    const [precio, setPrecio] = useState(k.precio_cents == null ? "" : String(k.precio_cents / 100).replace(".", ","));
+    const [iva, setIva] = useState(Number(k.iva_rate));
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState("");
+    const cents = precio.trim() === "" ? null : Math.round((parseFloat(precio.replace(",", ".")) || 0) * 100);
+    const cambiado = cents !== k.precio_cents || iva !== Number(k.iva_rate);
+    const ejecutar = async (fn, ok) => { setBusy(true); setMsg(""); try { await fn(); setMsg(ok); } catch (e) { setMsg("Error: " + (e.message || e)); } finally { setBusy(false); } };
+    return h("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13, padding: "6px 0", borderBottom: `1px solid ${SOFT}` } },
+      h("span", { style: { flex: "1 1 220px" } }, k.nombre, k.origen === "manual" && h("span", { style: { fontSize: 11, color: MUTED } }, "  · manual")),
+      h("input", { className: "axis-input", style: { width: 90 }, inputMode: "decimal", value: precio, placeholder: "Precio €", "aria-label": `Precio de ${k.nombre}`, onChange: (e) => setPrecio(e.target.value), disabled: !caja.puedeEditar }),
+      h("select", { className: "axis-input", style: { width: 110 }, value: iva, "aria-label": `IVA de ${k.nombre}`, onChange: (e) => setIva(Number(e.target.value)), disabled: !caja.puedeEditar }, TIPOS_IVA.map((t) => h("option", { key: t, value: t }, t === 0 ? "0 % exento" : `${t} %`))),
+      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy || !cambiado, onClick: () => ejecutar(() => caja.api.actualizarConcepto(k.id, { precio_cents: cents, iva_rate: iva }), "Guardado") }, "Guardar"),
+      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy, "aria-label": `Eliminar ${k.nombre}`, onClick: () => { if (window.confirm(`¿Quitar el concepto "${k.nombre}" de la lista? Los cobros ya registrados no cambian.`)) ejecutar(() => caja.api.borrarConcepto(k.id), ""); } }, "\u{1F5D1}"),
+      msg && h("span", { style: { fontSize: 12, color: msg.startsWith("Error") ? BAD : GOOD } }, msg));
   }
 
   /* ---------- gastos ---------- */
@@ -583,7 +629,7 @@
       h(CajaTab, { caja, month, setMonth }));
   }
 
-  window.CajaAxis = { calcIva, movimientos, calcularBalance, CajaTab, SelectorCliente }; // para las pruebas
+  window.CajaAxis = { calcIva, movimientos, calcularBalance, CajaTab, SelectorLista }; // para las pruebas
   const raiz = document.getElementById("root");
   if (raiz) ReactDOM.createRoot(raiz).render(h(App));
 })();
