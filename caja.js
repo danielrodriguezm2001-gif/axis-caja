@@ -205,6 +205,15 @@
         if (e) throw e;
         await cargar();
       },
+      async crearConcepto(d) {
+        if (!puedeEditar) throw new Error("Tu usuario solo puede ver la Caja.");
+        const nombre = String(d.nombre || "").trim();
+        if (!nombre) throw new Error("Pon un nombre a la tarifa.");
+        if (conceptosRef.current.some((k) => k.nombre_norm === normName(nombre))) throw new Error("Ya existe una tarifa con ese nombre.");
+        const { error: e } = await sb.from("caja_conceptos").insert({ nombre, nombre_norm: normName(nombre), precio_cents: d.precio_cents, iva_rate: d.iva_rate, origen: "manual", servicios: d.servicios });
+        if (e) throw e;
+        await cargar();
+      },
       async actualizarConcepto(id, cambios) {
         if (!puedeEditar) throw new Error("Tu usuario solo puede ver la Caja.");
         const { error: e } = await sb.from("caja_conceptos").update(cambios).eq("id", id);
@@ -226,37 +235,61 @@
   }
 
   /* ---------- pantalla ---------- */
-  const box = { background: "#fff", border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 };
+  const box = { background: "#fff", border: "1px solid #E3E9E6", borderRadius: 16, padding: "20px 22px", boxShadow: "0 1px 2px rgba(18,33,27,.04)" };
   const lbl = { fontSize: 12, color: MUTED, display: "grid", gap: 3 };
   const eurC = (cents) => eur2((cents || 0) / 100);
   const BAR_IN = "#2F7D4F", BAR_OUT = "#B23A3A";
   const vacio = () => ({ fecha: todayISO(), cliente_nombre: "", concepto: "", importe: "", iva_rate: 21, incluye_iva: true, vendedor: "", sin_aimharder: true, servicios: [], notas: "" });
   const vacioGasto = () => ({ fecha: todayISO(), concepto: "", proveedor: "", categoria: CATEGORIAS_GASTO[0], importe: "", iva_rate: 21, incluye_iva: true, factura: "", notas: "" });
-  const campoIva = (f, set) => [
-    h("label", { key: "inc", style: lbl }, "El importe…", h("select", { className: "axis-input", value: f.incluye_iva ? "si" : "no", onChange: set("incluye_iva") }, h("option", { value: "si" }, "ya incluye el IVA (total)"), h("option", { value: "no" }, "es sin IVA (se suma)"))),
-    h("label", { key: "iva", style: lbl }, "IVA (%)", h("select", { className: "axis-input", value: f.iva_rate, onChange: set("iva_rate") }, TIPOS_IVA.map((t) => h("option", { key: t, value: t }, t === 0 ? "0 % (exento)" : `${t} %`))))];
-  // Si el importe lo escribe la persona deja de ser el precio propuesto por el concepto (importe_auto).
-  const setter = (f, setF) => (k) => (e) => setF({ ...f, [k]: k === "iva_rate" ? Number(e.target.value) : k === "incluye_iva" ? e.target.value === "si" : e.target.type === "checkbox" ? e.target.checked : e.target.value, ...(k === "importe" ? { importe_auto: false } : {}) });
+  const diaMes = (iso) => `${(iso || "").slice(8, 10)} ${MESES[Number((iso || "").slice(5, 7)) - 1] || ""}`.trim();
 
-  function Login({ caja }) {
-    const [email, setEmail] = useState("");
-    const [clave, setClave] = useState("");
-    const [msg, setMsg] = useState("");
-    const [busy, setBusy] = useState(false);
-    const enviar = async (ev) => {
-      ev.preventDefault();
-      setBusy(true); setMsg("");
-      try { await caja.api.entrar(email, clave); } catch (e) { setMsg(e.message); } finally { setBusy(false); }
-    };
-    return h("form", { onSubmit: enviar, style: { display: "grid", gap: 10, maxWidth: 360 } },
-      h("label", { style: lbl }, "Email", h("input", { className: "axis-input", type: "email", autoComplete: "username", value: email, onChange: (e) => setEmail(e.target.value), required: true })),
-      h("label", { style: lbl }, "Contraseña", h("input", { className: "axis-input", type: "password", autoComplete: "current-password", value: clave, onChange: (e) => setClave(e.target.value), required: true })),
-      h("div", null, h("button", { className: "axis-btn primary", type: "submit", disabled: busy }, busy ? "Entrando…" : "Entrar")),
-      msg && h("p", { style: { margin: 0, fontSize: 13, color: BAD } }, msg));
+  /* --- piezas reutilizables --- */
+  function Pills({ opciones, valor, onChange, vacioOk, chica }) {
+    return h("div", { className: "cj-pills", role: "group" }, opciones.map((o) => {
+      const [v, l] = Array.isArray(o) ? o : [o, o];
+      const on = valor === v;
+      return h("button", { key: String(v), type: "button", className: "cj-pill" + (chica ? " sm" : "") + (on ? " on" : ""), "aria-pressed": on, onClick: () => onChange(on && vacioOk ? "" : v) }, l);
+    }));
+  }
+  function Segmentado({ opciones, valor, onChange }) {
+    return h("div", { className: "cj-seg", role: "group" }, opciones.map(([v, l]) => h("button", { key: String(v), type: "button", className: valor === v ? "on" : "", "aria-pressed": valor === v, onClick: () => onChange(v) }, l)));
+  }
+  function Campo({ etiqueta, ayuda, children }) {
+    return h("div", { className: "cj-field" }, etiqueta && h("span", { className: "cj-label" }, etiqueta), children, ayuda && h("span", { className: "cj-hint" }, ayuda));
+  }
+  function InputEuro({ value, onChange, placeholder, etiqueta, grande, style }) {
+    return h("div", { className: "cj-euro", style }, h("input", { className: "cj-input" + (grande ? " big" : ""), inputMode: "decimal", value, placeholder: placeholder || "0,00", "aria-label": etiqueta, onChange }), h("span", null, "€"));
+  }
+  function Aviso({ msg }) {
+    return msg && msg.t ? h("div", { className: "cj-aviso " + (msg.ok ? "ok" : "mal"), role: "status" }, msg.t) : null;
+  }
+  function ChipsServicios({ servicios }) {
+    const l = limpiarServicios(servicios);
+    return h("div", { className: "cj-chips" }, l.length ? l.map((x, i) => h("span", { key: i, className: "cj-chip" }, `${x.n} ${FAM_CORTA[x.fam] || x.fam}`)) : h("span", { className: "cj-chip mute" }, "Sin sesiones"));
+  }
+  function BarraMes({ month, setMonth }) {
+    return h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+      h("button", { className: "cj-btn sec sm", onClick: () => setMonth(shiftMonth(month, -1)), "aria-label": "Mes anterior" }, "←"),
+      h("input", { type: "month", className: "cj-input", style: { width: 190, height: 40 }, value: month, "aria-label": "Mes", onChange: (e) => e.target.value && setMonth(e.target.value) }),
+      h("button", { className: "cj-btn sec sm", onClick: () => setMonth(shiftMonth(month, 1)), "aria-label": "Mes siguiente" }, "→"));
+  }
+  function Marca({ children }) {
+    return h("div", { style: { display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" } }, h("h1", { className: "axis-display", style: { margin: 0, fontSize: 28, textTransform: "uppercase" } }, "Caja de Axis"), children);
   }
 
-  // Desplegable de clientes con buscador: se escribe parte del nombre (en cualquier
-  // orden) y se elige de la lista. Si no existe, ofrece crearlo.
+  // IVA: píldoras con el tipo y selector de si el importe ya lo incluye.
+  function IvaControl({ iva, incluye, onIva, onIncluye }) {
+    return h("div", { className: "cj-stack", style: { gap: 14 } },
+      Campo({ etiqueta: "IVA", children: h(Pills, { opciones: TIPOS_IVA.map((t) => [t, t === 0 ? "Exento" : `${t} %`]), valor: iva, onChange: onIva }) }),
+      Campo({ etiqueta: "El importe…", children: h(Segmentado, { opciones: [[true, "Incluye IVA"], [false, "Sin IVA (se suma)"]], valor: incluye, onChange: onIncluye }) }));
+  }
+  function Desglose({ calc }) {
+    return calc ? h("div", { className: "cj-desglose", "aria-live": "polite" },
+      h("span", { className: "k" }, "Base"), h("span", { className: "k" }, "IVA"), h("span", { className: "k" }, "Total"),
+      h("span", { className: "v" }, eurC(calc.base)), h("span", { className: "v" }, eurC(calc.iva)), h("span", { className: "t" }, eurC(calc.total))) : null;
+  }
+
+  // Desplegable con buscador (clientes, tarifas): se escribe parte del nombre, en cualquier orden.
   function SelectorLista({ items, value, onChange, placeholder, nuevo, vacio, detalle }) {
     const [abierto, setAbierto] = useState(false);
     const [texto, setTexto] = useState("");
@@ -278,34 +311,59 @@
       else if (e.key === "Escape" || e.key === "Tab") setAbierto(false);
     };
     return h("div", { style: { position: "relative" } },
-      h("input", { className: "axis-input", role: "combobox", "aria-expanded": abierto, "aria-controls": id, "aria-autocomplete": "list", autoComplete: "off", placeholder,
-        value: abierto ? texto : value, style: value && !abierto ? { fontWeight: 600, paddingRight: 28 } : undefined,
+      h("input", { className: "cj-input", role: "combobox", "aria-expanded": abierto, "aria-controls": id, "aria-autocomplete": "list", autoComplete: "off", placeholder,
+        value: abierto ? texto : value, style: value && !abierto ? { fontWeight: 600, paddingRight: 36 } : undefined,
         onFocus: () => { setTexto(""); setActivo(0); setAbierto(true); },
         onBlur: () => setAbierto(false),
         onChange: (e) => { setTexto(e.target.value); setActivo(0); setAbierto(true); },
         onKeyDown: teclas }),
-      value && !abierto && h("button", { type: "button", "aria-label": "Quitar selección", onMouseDown: (e) => { e.preventDefault(); onChange("", null); }, style: { position: "absolute", right: 4, top: 3, border: "none", background: "transparent", cursor: "pointer", fontSize: 16, color: MUTED } }, "×"),
-      abierto && h("div", { id, role: "listbox", style: { position: "absolute", left: 0, right: 0, top: "100%", marginTop: 2, maxHeight: 240, overflowY: "auto", background: "#fff", border: `1px solid #C9D2CD`, borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,.12)", zIndex: 30 } },
-        opciones.length === 0 && h("div", { style: { padding: "8px 10px", fontSize: 13, color: MUTED } }, items.length ? "Sin resultados" : vacio),
-        opciones.map((o, i) => h("div", { key: (o.nuevo ? "nuevo:" : "") + o.nombre, role: "option", "aria-selected": i === activo,
-          onMouseDown: (e) => { e.preventDefault(); elegir(o); }, onMouseEnter: () => setActivo(i),
-          style: { padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === activo ? SOFT : "#fff", borderTop: o.nuevo && visibles.length ? `1px solid ${LINE}` : "none", fontWeight: o.nuevo ? 600 : 400, display: "flex", justifyContent: "space-between", gap: 10 } }, o.nuevo ? nuevo(o.nombre) : o.nombre, !o.nuevo && detalle && h("span", { style: { fontWeight: 400, fontSize: 12, color: MUTED, whiteSpace: "nowrap" } }, detalle(o.item)))),
-        coincidencias.length > visibles.length && h("div", { style: { padding: "6px 10px", fontSize: 12, color: MUTED, borderTop: `1px solid ${LINE}` } }, `Mostrando ${visibles.length} de ${coincidencias.length}: sigue escribiendo para filtrar`)));
+      value && !abierto && h("button", { type: "button", "aria-label": "Quitar selección", onMouseDown: (e) => { e.preventDefault(); onChange("", null); }, style: { position: "absolute", right: 8, top: 8, width: 30, height: 30, border: "none", background: "transparent", cursor: "pointer", fontSize: 20, color: MUTED } }, "×"),
+      abierto && h("div", { id, role: "listbox", className: "cj-pop" },
+        opciones.length === 0 && h("div", { style: { padding: "10px 12px", fontSize: 14, color: MUTED } }, items.length ? "Sin resultados" : vacio),
+        opciones.map((o, i) => h("div", { key: (o.nuevo ? "nuevo:" : "") + o.nombre, role: "option", "aria-selected": i === activo, className: "cj-opt" + (i === activo ? " on" : "") + (o.nuevo ? " nuevo" : ""),
+          onMouseDown: (e) => { e.preventDefault(); elegir(o); }, onMouseEnter: () => setActivo(i) }, o.nuevo ? nuevo(o.nombre) : o.nombre, !o.nuevo && detalle && h("span", { className: "det" }, detalle(o.item)))),
+        coincidencias.length > visibles.length && h("div", { style: { padding: "8px 12px", fontSize: 12, color: MUTED } }, `Mostrando ${visibles.length} de ${coincidencias.length}: sigue escribiendo para filtrar`)));
   }
 
-  // Editor de las sesiones por servicio de una tarifa o de un cobro.
-  function EditorServicios({ lineas, onChange, disabled }) {
+  // Sesiones por servicio (como «Clases incluidas» de AimHarder): píldoras para elegir el servicio y
+  // un selector de sesiones por cada uno. Sirve para una tarifa y para cada cobro.
+  function ServiciosPills({ lineas, onChange, disabled }) {
+    const por = (fam) => lineas.findIndex((l) => l.fam === fam);
+    const alternar = (fam) => { const i = por(fam); onChange(i >= 0 ? lineas.filter((_, j) => j !== i) : [...lineas, { fam, n: 1, valor: "", generico: false }]); };
     const cambia = (i, patch) => onChange(lineas.map((l, j) => (j === i ? { ...l, ...patch } : l)));
-    return h("div", { style: { display: "grid", gap: 6 } },
-      lineas.length === 0 && h("span", { style: { fontSize: 12, color: MUTED } }, "Sin sesiones: cuenta como ingreso pero no genera bono (p. ej. cuotas del Axis Club)."),
-      lineas.map((l, i) => h("div", { key: i, style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
-        h("select", { className: "axis-input", style: { width: 190 }, value: l.fam, disabled, "aria-label": "Servicio", onChange: (e) => cambia(i, { fam: e.target.value, generico: e.target.value === "Entrenamiento personal" ? l.generico : false }) }, SERVICIOS.map((x) => h("option", { key: x, value: x }, x))),
-        h("input", { className: "axis-input", style: { width: 64 }, inputMode: "decimal", value: l.n, disabled, "aria-label": "Número de sesiones", onChange: (e) => cambia(i, { n: e.target.value }) }),
-        h("span", { style: { fontSize: 12, color: MUTED } }, "sesión(es)"),
-        h("input", { className: "axis-input", style: { width: 110 }, inputMode: "decimal", value: l.valor == null ? "" : l.valor, disabled, placeholder: "Valor fijo €", title: "Opcional: importe fijo de esta línea (p. ej. 100 € de la valoración en un pack). El resto del precio se reparte entre las demás.", "aria-label": "Valor fijo", onChange: (e) => cambia(i, { valor: e.target.value }) }),
-        l.fam === "Entrenamiento personal" && h("label", { style: { fontSize: 12, color: MUTED, display: "flex", gap: 4, alignItems: "center" }, title: "Bono de EP sin especificar: también puede cubrir sesiones de fisioterapia" }, h("input", { type: "checkbox", checked: !!l.generico, disabled, onChange: (e) => cambia(i, { generico: e.target.checked }) }), "también cubre fisio"),
-        !disabled && h("button", { type: "button", className: "axis-btn ghost", style: { padding: "2px 8px" }, "aria-label": "Quitar línea", onClick: () => onChange(lineas.filter((_, j) => j !== i)) }, "×"))),
-      !disabled && h("div", null, h("button", { type: "button", className: "axis-btn ghost", style: { padding: "3px 10px", fontSize: 12 }, onClick: () => onChange([...lineas, { fam: "Entrenamiento personal", n: 1, valor: "", generico: false }]) }, "+ Añadir servicio")));
+    return h("div", { className: "cj-stack", style: { gap: 14 } },
+      h("div", { className: "cj-between" }, h("span", { className: "cj-label" }, "Tipo de servicio"), lineas.length > 0 && !disabled && h("button", { type: "button", className: "cj-link", onClick: () => onChange([]) }, "Quitar todos")),
+      h("div", { className: "cj-pills" }, SERVICIOS.map((fam) => { const on = por(fam) >= 0; return h("button", { key: fam, type: "button", disabled, className: "cj-pill" + (on ? " on" : ""), "aria-pressed": on, onClick: () => alternar(fam) }, on ? "✓ " + fam : fam); })),
+      lineas.length === 0
+        ? h("p", { className: "cj-hint", style: { margin: 0 } }, "Sin sesiones: el cobro cuenta como ingreso pero no genera bono (p. ej. las cuotas del Axis Club).")
+        : h("div", { className: "cj-lines" }, lineas.map((l, i) => h("div", { key: l.fam, className: "cj-line" },
+          h("span", { className: "cj-line-name" }, l.fam),
+          h("div", { className: "cj-stepper" },
+            h("button", { type: "button", disabled, "aria-label": `Una sesión menos de ${l.fam}`, onClick: () => cambia(i, { n: Math.max(1, numLinea(l.n) - 1) }) }, "−"),
+            h("input", { inputMode: "decimal", value: l.n, disabled, "aria-label": `Sesiones de ${l.fam}`, onChange: (e) => cambia(i, { n: e.target.value }) }),
+            h("button", { type: "button", disabled, "aria-label": `Una sesión más de ${l.fam}`, onClick: () => cambia(i, { n: numLinea(l.n) + 1 }) }, "+")),
+          h("span", { className: "cj-hint" }, numLinea(l.n) === 1 ? "sesión" : "sesiones"),
+          (l.valor !== "" && l.valor != null) || l.mostrarValor
+            ? h("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, h(InputEuro, { value: l.valor == null ? "" : l.valor, etiqueta: `Valor fijo de ${l.fam}`, placeholder: "Valor", style: { width: 130 }, onChange: (e) => cambia(i, { valor: e.target.value }) }), !disabled && h("button", { type: "button", className: "cj-link", onClick: () => cambia(i, { valor: "", mostrarValor: false }) }, "Quitar valor"))
+            : !disabled && h("button", { type: "button", className: "cj-link", title: "Importe fijo de esta línea (p. ej. 100 € de la valoración en un pack): el resto del precio se reparte entre las demás", onClick: () => cambia(i, { mostrarValor: true }) }, "Fijar valor"),
+          l.fam === "Entrenamiento personal" && h("button", { type: "button", disabled, className: "cj-pill sm" + (l.generico ? " on" : ""), "aria-pressed": !!l.generico, title: "Bono de EP sin especificar: también puede cubrir sesiones de fisioterapia", onClick: () => cambia(i, { generico: !l.generico }) }, "También cubre fisio")))));
+  }
+
+  function Login({ caja }) {
+    const [email, setEmail] = useState("");
+    const [clave, setClave] = useState("");
+    const [msg, setMsg] = useState("");
+    const [busy, setBusy] = useState(false);
+    const enviar = async (ev) => {
+      ev.preventDefault();
+      setBusy(true); setMsg("");
+      try { await caja.api.entrar(email, clave); } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+    };
+    return h("form", { onSubmit: enviar, className: "cj-stack", style: { gap: 16 } },
+      Campo({ etiqueta: "Email", children: h("input", { className: "cj-input", type: "email", autoComplete: "username", value: email, onChange: (e) => setEmail(e.target.value), required: true }) }),
+      Campo({ etiqueta: "Contraseña", children: h("input", { className: "cj-input", type: "password", autoComplete: "current-password", value: clave, onChange: (e) => setClave(e.target.value), required: true }) }),
+      h("button", { className: "cj-btn accent", type: "submit", disabled: busy, style: { justifyContent: "center" } }, busy ? "Entrando…" : "Entrar"),
+      msg && h("div", { className: "cj-aviso mal", role: "alert" }, msg));
   }
 
   function useFormulario(inicial, guardarFn, okNuevo, okEdicion) {
@@ -327,9 +385,9 @@
   }
 
   /* ---------- cobros ---------- */
-  function PagosCaja({ caja, month }) {
+  function PagosCaja({ caja, month, setMonth }) {
     const { f, setF, editId, setEditId, msg, busy, ejecutar, guardar } = useFormulario(vacio, caja.api.guardarPago, "Cobro registrado.", "Cambios guardados.");
-    const set = setter(f, setF);
+    const [verSesiones, setVerSesiones] = useState(false);
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.cliente_nombre.trim() && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
     const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
@@ -339,88 +397,140 @@
     // El importe cobrado se puede cambiar siempre (descuentos, packs a medida…): la tarifa es solo una propuesta.
     const distinto = precioTarifa != null && Number.isFinite(importe) && Math.round(importe * 100) !== precioTarifa;
     const editar = (c) => {
-      setEditId(c.id);
+      setEditId(c.id); setVerSesiones(false);
       setF({ fecha: c.fecha, cliente_nombre: c.cliente_nombre, concepto: c.concepto, importe: String(c.importe_cents / 100).replace(".", ","), iva_rate: Number(c.iva_rate), incluye_iva: true, vendedor: c.vendedor, sin_aimharder: c.sin_aimharder, servicios: copiarServicios(c.servicios), notas: c.notas });
       window.scrollTo({ top: 0, behavior: "smooth" });
     };
     const delMes = caja.pagos.filter((c) => (c.fecha || "").startsWith(month)).sort((a, b) => b.fecha.localeCompare(a.fecha));
     const suma = (k) => delMes.reduce((a, c) => a + c[k], 0);
-    const fila = (c) => h("div", { key: c.id, style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13, padding: "8px 0", borderBottom: `1px solid ${SOFT}` } },
-      h("span", { style: { color: MUTED, minWidth: 78 } }, c.fecha),
-      h("b", { style: { flex: "1 1 180px" } }, c.concepto, c.cliente_nombre ? ` · ${c.cliente_nombre}` : "", c.notas ? h("span", { style: { fontWeight: 400, color: MUTED } }, ` — ${c.notas}`) : null),
-      c.vendedor && h("span", { style: { color: MUTED } }, c.vendedor),
-      h("span", { style: { fontSize: 12, color: MUTED }, title: "Sesiones que incluye este cobro (generan el bono del cliente en el panel)" }, resumenServicios(c.servicios)),
-      h("span", { style: { fontSize: 12, color: MUTED }, title: "Base imponible + IVA" }, `${eurC(c.base_cents)} + IVA ${Number(c.iva_rate)}% (${eurC(c.iva_cents)})`),
-      h("b", { style: { minWidth: 80, textAlign: "right" } }, eurC(c.importe_cents)),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, onClick: () => editar(c) }, "Editar"),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy, "aria-label": "Eliminar cobro", onClick: () => {
-        if (window.confirm(`¿Eliminar el cobro "${c.concepto}" de ${eurC(c.importe_cents)}?`)) ejecutar(() => caja.api.borrarPago(c.id), "Cobro eliminado.");
-      } }, "\u{1F5D1}"));
-    return h("div", { style: { display: "grid", gap: 18 } },
-      caja.puedeEditar && h("section", { style: box },
-        h("h2", { className: "axis-display", style: { margin: "0 0 6px", fontSize: 20, textTransform: "uppercase" } }, editId ? "Editar cobro" : "Registrar cobro"),
-        h("p", { style: { margin: "0 0 12px", fontSize: 13, color: MUTED } }, "Caja de efectivo: los cobros en efectivo se registran solo aquí, no en AimHarder. Se apunta lo que se cobra, con el IVA que lleva y las sesiones que incluye la tarifa: el panel las convierte en el bono del cliente. Para algo que no está en las tarifas, crea un concepto nuevo."),
-        h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 } },
-          h("label", { style: lbl }, h("b", { style: { color: INK } }, "Fecha del cobro"), h("input", { type: "date", className: "axis-input", value: f.fecha, onChange: set("fecha") })),
-          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Cliente"), h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) })),
-          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Producto / concepto"), h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar producto…", vacio: "Aún no hay conceptos: escribe uno para crearlo", nuevo: (t) => `+ Crear concepto «${t}»`, detalle: (k) => `${k.precio_cents ? eurC(k.precio_cents) : "sin precio"} · ${Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)}%`}`,
-            // Al elegir una tarifa de AimHarder se rellenan su precio e IVA habituales; un concepto nuevo/manual no existe en AimHarder.
-            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, servicios: item ? copiarServicios(item.servicios) : [], ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), ...(item.precio_cents && (!String(a.importe).trim() || a.importe_auto) ? { importe: String(item.precio_cents / 100).replace(".", ","), importe_auto: true } : {}) } : {}) })) })),
-          h("label", { style: lbl }, h("b", { style: { color: INK } }, "Importe cobrado (€)"), h("input", { className: "axis-input", inputMode: "decimal", value: f.importe, onChange: set("importe"), placeholder: "0,00" })),
-          campoIva(f, set),
-          h("label", { style: lbl }, "Vendedor", h("select", { className: "axis-input", value: f.vendedor, onChange: set("vendedor") }, h("option", { value: "" }, "Sin vendedor (Axis)"), VENDEDORES.map((v) => h("option", { key: v, value: v }, v)))),
-          h("label", { style: lbl }, "Notas (opcional)", h("input", { className: "axis-input", value: f.notas, onChange: set("notas") }))),
-        h("div", { style: { marginTop: 12, display: "grid", gap: 6 } },
-          h("div", { style: { fontSize: 12, color: INK, fontWeight: 700 } }, "Sesiones que incluye este cobro"),
-          h("div", { style: { fontSize: 12, color: MUTED } }, "Salen de la tarifa y se pueden ajustar. El panel las convierte en el bono del cliente y las va gastando con sus sesiones de AimHarder."),
-          h(EditorServicios, { lineas: f.servicios, onChange: (servicios) => setF((a) => ({ ...a, servicios })) })),
-        calc && h("p", { style: { margin: "10px 0 0", fontSize: 13 } }, "Base ", h("b", null, eurC(calc.base)), " + IVA ", h("b", null, eurC(calc.iva)), " = total cobrado ", h("b", null, eurC(calc.total))),
-        precioTarifa != null && h("p", { style: { margin: "6px 0 0", fontSize: 12, color: distinto ? WARN : MUTED } }, `Tarifa: ${eurC(precioTarifa)} con IVA. El importe es editable: escribe lo que realmente se cobra.`, distinto && " (distinto de la tarifa)", distinto && h("button", { type: "button", className: "axis-btn ghost", style: { padding: "1px 8px", marginLeft: 8, fontSize: 12 }, onClick: () => setF((a) => ({ ...a, importe: String(precioTarifa / 100).replace(".", ","), importe_auto: true })) }, "Volver a la tarifa")),
-        conceptoNuevo && h("p", { style: { margin: "6px 0 0", fontSize: 12, color: MUTED } }, "Concepto nuevo: se guardará en la lista con este IVA, este importe y estas sesiones como habituales."),
-        h("div", { style: { marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" } },
-          h("button", { className: "axis-btn primary", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar cobro"),
-          editId && h("button", { className: "axis-btn ghost", onClick: () => { setEditId(null); setF(vacio()); } }, "Cancelar"),
-          msg.t && h("span", { style: { fontSize: 13, color: msg.ok ? GOOD : BAD } }, msg.t))),
-      h("section", { style: box },
-        h("div", { style: { display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 10 } },
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Cobrado en el mes"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("importe_cents"))), h("div", { style: { fontSize: 12, color: MUTED } }, `${delMes.length} cobro(s)`)),
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Base imponible"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("base_cents")))),
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "IVA repercutido"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("iva_cents"))))),
-        delMes.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))),
-      h("details", { style: box },
-        h("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: 14 } }, `Conceptos y tarifas (${caja.conceptos.length})`),
-        h("p", { style: { margin: "10px 0", fontSize: 13, color: MUTED } }, "Cada tarifa tiene su precio (IVA incluido), su IVA y las sesiones que incluye por servicio: al cobrarla, esas sesiones generan el bono del cliente en el panel. El IVA por defecto es 0 % en fisioterapia, nutrición y psicología, y 21 % en el resto. Pulsa las sesiones de una tarifa para editarlas. Los conceptos nuevos se crean desde el desplegable al registrar un cobro."),
-        caja.conceptos.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "Aún no hay conceptos.") : h("div", null, caja.conceptos.map((k) => h(FilaConcepto, { key: k.id + ":" + k.precio_cents + ":" + k.iva_rate + ":" + JSON.stringify(k.servicios), caja, k })))));
+    const fila = (c) => h("div", { key: c.id, className: "cj-fila" },
+      h("div", { className: "cj-fecha" }, h("b", null, (c.fecha || "").slice(8, 10)), MESES[Number((c.fecha || "").slice(5, 7)) - 1]),
+      h("div", { style: { minWidth: 0 } },
+        h("div", { className: "cj-titulo" }, c.concepto),
+        h("div", { className: "cj-sub" }, [c.cliente_nombre, c.vendedor, c.notas].filter(Boolean).join(" · ")),
+        h(ChipsServicios, { servicios: c.servicios })),
+      h("div", { className: "cj-importe" }, h("b", null, eurC(c.importe_cents)), h("div", { className: "cj-hint" }, Number(c.iva_rate) === 0 ? "sin IVA" : `${eurC(c.base_cents)} + IVA ${Number(c.iva_rate)} %`)),
+      caja.puedeEditar && h("div", { className: "cj-acciones", style: { display: "flex" } },
+        h("button", { className: "cj-ico", title: "Editar", "aria-label": `Editar ${c.concepto}`, onClick: () => editar(c) }, "✎"),
+        h("button", { className: "cj-ico", title: "Eliminar", disabled: busy, "aria-label": `Eliminar ${c.concepto}`, onClick: () => { if (window.confirm(`¿Eliminar el cobro "${c.concepto}" de ${eurC(c.importe_cents)}?`)) ejecutar(() => caja.api.borrarPago(c.id), "Cobro eliminado."); } }, "\u{1F5D1}")));
+    return h("div", { className: "cj-stack" },
+      caja.puedeEditar && h("section", { className: "cj-card" },
+        h("div", { className: "cj-between" },
+          h("h2", { className: "axis-display", style: { margin: 0, fontSize: 24, textTransform: "uppercase" } }, editId ? "Editar cobro" : "Registrar cobro"),
+          editId && h("button", { className: "cj-link", onClick: () => { setEditId(null); setF(vacio()); } }, "Cancelar edición")),
+        h("p", { className: "cj-hint", style: { margin: "6px 0 14px" } }, "Los cobros en efectivo se registran solo aquí, no en AimHarder. El panel convierte las sesiones de la tarifa en el bono del cliente."),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Cliente y tarifa"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Cliente", children: h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) }) }),
+            Campo({ etiqueta: "Tarifa", children: h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar tarifa…", vacio: "Aún no hay tarifas: escribe un nombre para crear una", nuevo: (t) => `+ Crear tarifa «${t}»`, detalle: (k) => `${k.precio_cents ? eurC(k.precio_cents) : "sin precio"} · ${Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)} %`}`,
+              // Al elegir una tarifa se rellenan su precio, su IVA y sus sesiones; un concepto nuevo parte sin sesiones.
+              onChange: (v, item) => setF((a) => ({ ...a, concepto: v, servicios: item ? copiarServicios(item.servicios) : [], ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), ...(item.precio_cents && (!String(a.importe).trim() || a.importe_auto) ? { importe: String(item.precio_cents / 100).replace(".", ","), importe_auto: true } : {}) } : {}) })) }) })),
+          f.concepto.trim() && h("div", { className: "cj-stack", style: { gap: 12 } },
+            h("div", { className: "cj-between" },
+              h("span", { className: "cj-label" }, conceptoNuevo ? "Tarifa nueva · sesiones que incluye" : "Sesiones que incluye"),
+              !conceptoNuevo && h("button", { className: "cj-link", onClick: () => setVerSesiones(!verSesiones) }, verSesiones ? "Listo" : "Editar sesiones")),
+            conceptoNuevo || verSesiones ? h(ServiciosPills, { lineas: f.servicios, onChange: (servicios) => setF((a) => ({ ...a, servicios })) }) : h(ChipsServicios, { servicios: f.servicios }),
+            conceptoNuevo && h("span", { className: "cj-hint" }, "Se guardará en Tarifas con este precio, IVA y sesiones como habituales."))),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Importe"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Importe cobrado", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe cobrado", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value, importe_auto: false })) }) }),
+            h(IvaControl, { iva: f.iva_rate, incluye: f.incluye_iva, onIva: (v) => setF((a) => ({ ...a, iva_rate: v })), onIncluye: (v) => setF((a) => ({ ...a, incluye_iva: v })) })),
+          h(Desglose, { calc }),
+          precioTarifa != null && h("div", { className: "cj-hint", style: { color: distinto ? WARN : MUTED } }, `Tarifa: ${eurC(precioTarifa)} con IVA. El importe es editable: escribe lo que realmente se cobra.`, distinto && " Es distinto de la tarifa. ", distinto && h("button", { type: "button", className: "cj-link", onClick: () => setF((a) => ({ ...a, importe: String(precioTarifa / 100).replace(".", ","), importe_auto: true })) }, "Volver a la tarifa"))),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Detalles"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Fecha del cobro", children: h("input", { type: "date", className: "cj-input", value: f.fecha, onChange: (e) => setF((a) => ({ ...a, fecha: e.target.value })) }) }),
+            Campo({ etiqueta: "Notas (opcional)", children: h("input", { className: "cj-input", value: f.notas, onChange: (e) => setF((a) => ({ ...a, notas: e.target.value })) }) })),
+          Campo({ etiqueta: "Vendedor", ayuda: "Quién lo vende. Sin elegir, cuenta como Axis.", children: h(Pills, { opciones: VENDEDORES, valor: f.vendedor, vacioOk: true, onChange: (v) => setF((a) => ({ ...a, vendedor: v })) }) })),
+        h("div", { style: { display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", paddingTop: 6 } },
+          h("button", { className: "cj-btn accent", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar cobro"),
+          h(Aviso, { msg }))),
+      h("section", { className: "cj-card" },
+        h("div", { className: "cj-between", style: { marginBottom: 16 } },
+          h("div", { className: "cj-kpi" },
+            h("div", null, h("div", { className: "cj-hint" }, "Cobrado en el mes"), h("div", { className: "n" }, eurC(suma("importe_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} cobro(s)`)),
+            h("div", null, h("div", { className: "cj-hint" }, "Base imponible"), h("div", { className: "n" }, eurC(suma("base_cents")))),
+            h("div", null, h("div", { className: "cj-hint" }, "IVA repercutido"), h("div", { className: "n" }, eurC(suma("iva_cents"))))),
+          h(BarraMes, { month, setMonth })),
+        delMes.length === 0 ? h("p", { className: "cj-hint", style: { margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))));
   }
 
-  // Precio e IVA habituales de cada concepto (el IVA correcto depende del servicio: se ajusta aquí).
-  function FilaConcepto({ caja, k }) {
-    const [precio, setPrecio] = useState(k.precio_cents == null ? "" : String(k.precio_cents / 100).replace(".", ","));
-    const [iva, setIva] = useState(Number(k.iva_rate));
+  /* ---------- tarifas ---------- */
+  function EditorTarifa({ caja, k, onVolver }) {
+    const nueva = !k;
+    const [tab, setTab] = useState("datos");
+    const [nombre, setNombre] = useState(k ? k.nombre : "");
+    const [precio, setPrecio] = useState(k && k.precio_cents != null ? String(k.precio_cents / 100).replace(".", ",") : "");
+    const [iva, setIva] = useState(k ? Number(k.iva_rate) : 21);
+    const [servicios, setServicios] = useState(() => copiarServicios(k ? k.servicios : []));
+    const [msg, setMsg] = useState({ ok: true, t: "" });
     const [busy, setBusy] = useState(false);
-    const [msg, setMsg] = useState("");
-    const cents = precio.trim() === "" ? null : Math.round((parseFloat(precio.replace(",", ".")) || 0) * 100);
-    const [servicios, setServicios] = useState(() => copiarServicios(k.servicios));
-    const [abierto, setAbierto] = useState(false);
-    const cambiado = cents !== k.precio_cents || iva !== Number(k.iva_rate) || JSON.stringify(limpiarServicios(servicios)) !== JSON.stringify(limpiarServicios(k.servicios));
-    const ejecutar = async (fn, ok) => { setBusy(true); setMsg(""); try { await fn(); setMsg(ok); } catch (e) { setMsg("Error: " + (e.message || e)); } finally { setBusy(false); } };
-    return h("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13, padding: "6px 0", borderBottom: `1px solid ${SOFT}` } },
-      h("span", { style: { flex: "1 1 220px" } }, k.nombre, k.origen === "manual" && h("span", { style: { fontSize: 11, color: MUTED } }, "  · manual")),
-      h("input", { className: "axis-input", style: { width: 90 }, inputMode: "decimal", value: precio, placeholder: "Precio €", "aria-label": `Precio de ${k.nombre}`, onChange: (e) => setPrecio(e.target.value), disabled: !caja.puedeEditar }),
-      h("select", { className: "axis-input", style: { width: 110 }, value: iva, "aria-label": `IVA de ${k.nombre}`, onChange: (e) => setIva(Number(e.target.value)), disabled: !caja.puedeEditar }, TIPOS_IVA.map((t) => h("option", { key: t, value: t }, t === 0 ? "0 % exento" : `${t} %`))),
-      h("button", { className: "axis-btn ghost", style: { padding: "3px 8px", maxWidth: 230 }, "aria-expanded": abierto, title: "Sesiones que incluye esta tarifa", onClick: () => setAbierto(!abierto) }, `${resumenServicios(servicios)} ${abierto ? "▴" : "▾"}`),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy || !cambiado, onClick: () => ejecutar(() => caja.api.actualizarConcepto(k.id, { precio_cents: cents, iva_rate: iva, servicios: limpiarServicios(servicios) }), "Guardado") }, "Guardar"),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy, "aria-label": `Eliminar ${k.nombre}`, onClick: () => { if (window.confirm(`¿Quitar el concepto "${k.nombre}" de la lista? Los cobros ya registrados no cambian.`)) ejecutar(() => caja.api.borrarConcepto(k.id), ""); } }, "\u{1F5D1}"),
-      msg && h("span", { style: { fontSize: 12, color: msg.startsWith("Error") ? BAD : GOOD } }, msg),
-      abierto && h("div", { style: { flexBasis: "100%", padding: "6px 0 4px 8px" } }, h(EditorServicios, { lineas: servicios, onChange: setServicios, disabled: !caja.puedeEditar })));
+    const bloqueado = !!k && k.origen === "aimharder";
+    const cents = precio.trim() === "" ? null : Math.round(numLinea(precio) * 100);
+    const guardar = async () => {
+      setBusy(true); setMsg({ ok: true, t: "Guardando…" });
+      try {
+        if (nueva) await caja.api.crearConcepto({ nombre, precio_cents: cents, iva_rate: iva, servicios: limpiarServicios(servicios) });
+        else await caja.api.actualizarConcepto(k.id, { ...(bloqueado ? {} : { nombre: nombre.trim(), nombre_norm: normName(nombre) }), precio_cents: cents, iva_rate: iva, servicios: limpiarServicios(servicios) });
+        onVolver();
+      } catch (e) { setMsg({ ok: false, t: "No se ha guardado: " + (e.message || e) }); } finally { setBusy(false); }
+    };
+    const eliminar = async () => {
+      if (!window.confirm(`¿Quitar la tarifa "${k.nombre}"? Los cobros ya registrados no cambian.`)) return;
+      setBusy(true);
+      try { await caja.api.borrarConcepto(k.id); onVolver(); } catch (e) { setMsg({ ok: false, t: "No se ha eliminado: " + (e.message || e) }); setBusy(false); }
+    };
+    return h("div", { className: "cj-stack" },
+      h("div", { className: "cj-between" },
+        h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+          h("button", { className: "cj-link", style: { fontSize: 15, color: MUTED }, onClick: onVolver }, "‹ Volver a tarifas"),
+          h("span", { style: { color: "#C0CAC5" } }, "/"),
+          h("h2", { style: { margin: 0, fontSize: 18 } }, nueva ? "Crear tarifa" : "Editar tarifa")),
+        caja.puedeEditar && h("button", { className: "cj-btn accent", disabled: busy || !nombre.trim(), onClick: guardar }, "✓ Guardar")),
+      h("section", { className: "cj-card" },
+        h("div", { className: "cj-tabs sub", role: "tablist" }, [["datos", "Datos"], ["clases", "Clases incluidas"]].map(([id, t]) => h("button", { key: id, role: "tab", "aria-selected": tab === id, className: "cj-tab" + (tab === id ? " on" : ""), onClick: () => setTab(id) }, t))),
+        h("div", { style: { textAlign: "center", fontWeight: 700, padding: "16px 0 8px", borderBottom: "1px solid var(--line)" } }, nombre.trim() || "Tarifa sin nombre"),
+        h("div", { className: "cj-stack", style: { padding: "26px 8px 8px", maxWidth: 760 } },
+          tab === "datos"
+            ? [
+              h("span", { key: "e", className: "cj-eyebrow" }, "Datos de la tarifa"),
+              Campo({ key: "n", etiqueta: "Nombre", ayuda: bloqueado ? "Es una tarifa de AimHarder: el nombre debe coincidir con el de allí." : "Así saldrá al elegirla en un cobro.", children: h("input", { className: "cj-input", value: nombre, disabled: bloqueado || !caja.puedeEditar, onChange: (e) => setNombre(e.target.value), placeholder: "Ej. Bono 4 sesiones - FISIOTERAPIA" }) }),
+              Campo({ key: "p", etiqueta: "Precio", ayuda: "Con IVA incluido. Se propone al cobrarla y se puede cambiar en cada cobro.", children: h(InputEuro, { value: precio, etiqueta: "Precio", style: { maxWidth: 240 }, onChange: (e) => setPrecio(e.target.value) }) }),
+              Campo({ key: "i", etiqueta: "IVA", ayuda: "Fisioterapia, nutrición y psicología van sin IVA; el resto al 21 %.", children: h(Pills, { opciones: TIPOS_IVA.map((t) => [t, t === 0 ? "Exento" : `${t} %`]), valor: iva, onChange: setIva }) })]
+            : [
+              h("span", { key: "e", className: "cj-eyebrow" }, "Clases incluidas"),
+              h("p", { key: "d", className: "cj-hint", style: { margin: 0 } }, "Qué sesiones da esta tarifa. Al cobrarla, el panel las convierte en el bono del cliente y las gasta con sus sesiones de AimHarder."),
+              h(ServiciosPills, { key: "s", lineas: servicios, onChange: setServicios, disabled: !caja.puedeEditar })]),
+        h(Aviso, { msg })),
+      !nueva && caja.puedeEditar && h("div", null, h("button", { className: "cj-link bad", onClick: eliminar, disabled: busy }, "Eliminar tarifa")));
+  }
+
+  function TarifasCaja({ caja }) {
+    const [vista, setVista] = useState({ modo: "lista" });
+    const [q, setQ] = useState("");
+    if (vista.modo === "editor") return h(EditorTarifa, { caja, k: vista.k, onVolver: () => setVista({ modo: "lista" }), key: vista.k ? vista.k.id : "nueva" });
+    const t = normName(q).split(" ").filter(Boolean);
+    const items = caja.conceptos.filter((k) => t.every((x) => k.nombre_norm.includes(x)));
+    return h("div", { className: "cj-stack" },
+      h("div", { className: "cj-between" },
+        h("input", { className: "cj-input", style: { maxWidth: 360 }, placeholder: "Buscar tarifa…", value: q, onChange: (e) => setQ(e.target.value), "aria-label": "Buscar tarifa" }),
+        caja.puedeEditar && h("button", { className: "cj-btn accent", onClick: () => setVista({ modo: "editor", k: null }) }, "+ Nueva tarifa")),
+      h("p", { className: "cj-hint", style: { margin: 0 } }, `${caja.conceptos.length} tarifas. Cada una tiene su precio, su IVA y las sesiones que incluye por servicio; pulsa una para editarla.`),
+      items.length === 0 ? h("div", { className: "cj-card" }, h("p", { className: "cj-hint", style: { margin: 0 } }, "Ninguna tarifa coincide.")) :
+        h("div", { className: "cj-tarifas" }, items.map((k) => h("button", { key: k.id, className: "cj-tarifa", onClick: () => setVista({ modo: "editor", k }) },
+          h("div", { className: "cj-between", style: { alignItems: "flex-start" } }, h("h3", null, k.nombre), h("span", { className: "cj-chip mute" }, k.origen === "manual" ? "Manual" : "AimHarder")),
+          h("div", { style: { display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" } }, h("span", { className: "precio" }, k.precio_cents != null ? eurC(k.precio_cents) : "—"), h("span", { className: "cj-chip " + (Number(k.iva_rate) === 0 ? "warn" : "mute") }, Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)} %`)),
+          h(ChipsServicios, { servicios: k.servicios })))));
   }
 
   /* ---------- gastos ---------- */
-  function GastosCaja({ caja, month }) {
+  function GastosCaja({ caja, month, setMonth }) {
     const { f, setF, editId, setEditId, msg, busy, ejecutar, guardar } = useFormulario(vacioGasto, caja.api.guardarGasto, "Gasto registrado.", "Cambios guardados.");
     const [fCat, setFCat] = useState("");
     const [fTexto, setFTexto] = useState("");
-    const set = setter(f, setF);
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
     const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
@@ -438,51 +548,61 @@
     const maxCat = Math.max(1, ...cats.map((c) => c[1]));
     const proveedores = [...new Set(caja.gastos.map((g) => g.proveedor).filter(Boolean))].sort();
     const conceptos = [...new Set(caja.gastos.map((g) => g.concepto))].sort();
-    const fila = (g) => h("div", { key: g.id, style: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13, padding: "8px 0", borderBottom: `1px solid ${SOFT}` } },
-      h("span", { style: { color: MUTED, minWidth: 78 } }, g.fecha),
-      h("div", { style: { flex: "1 1 200px" } },
-        h("b", null, g.concepto, g.proveedor ? ` · ${g.proveedor}` : ""),
-        h("div", { style: { fontSize: 12, color: MUTED } }, g.categoria, g.factura ? ` · Factura ${g.factura}` : "", g.notas ? ` — ${g.notas}` : "")),
-      h("span", { style: { fontSize: 12, color: MUTED }, title: "Base imponible + IVA" }, `${eurC(g.base_cents)} + IVA ${Number(g.iva_rate)}% (${eurC(g.iva_cents)})`),
-      h("b", { style: { minWidth: 80, textAlign: "right" } }, eurC(g.total_cents)),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, onClick: () => cargarEnForm(g, false) }, "Editar"),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, title: "Copiar este gasto con la fecha de hoy (p. ej. un gasto mensual)", onClick: () => cargarEnForm(g, true) }, "Duplicar"),
-      caja.puedeEditar && h("button", { className: "axis-btn ghost", style: { padding: "3px 8px" }, disabled: busy, "aria-label": "Eliminar gasto", onClick: () => {
-        if (window.confirm(`¿Eliminar el gasto "${g.concepto}" de ${eurC(g.total_cents)}?`)) ejecutar(() => caja.api.borrarGasto(g.id), "Gasto eliminado.");
-      } }, "\u{1F5D1}"));
-    return h("div", { style: { display: "grid", gap: 18 } },
-      caja.puedeEditar && h("section", { style: box },
-        h("h2", { className: "axis-display", style: { margin: "0 0 6px", fontSize: 20, textTransform: "uppercase" } }, editId ? "Editar gasto" : "Registrar gasto"),
-        h("p", { style: { margin: "0 0 12px", fontSize: 13, color: MUTED } }, "Salidas de dinero de la caja (en efectivo). Indica si el importe ya lleva IVA o hay que sumarlo: el panel separa base e IVA."),
-        h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 } },
-          h("label", { style: lbl }, h("b", { style: { color: INK } }, "Fecha del gasto"), h("input", { type: "date", className: "axis-input", value: f.fecha, onChange: set("fecha") })),
-          h("label", { style: lbl }, "Concepto", h("input", { className: "axis-input", list: "caja-g-conceptos", value: f.concepto, onChange: set("concepto"), placeholder: "Ej. Material de limpieza" })),
-          h("label", { style: lbl }, "Proveedor (opcional)", h("input", { className: "axis-input", list: "caja-g-proveedores", value: f.proveedor, onChange: set("proveedor") })),
-          h("label", { style: lbl }, "Categoría", h("select", { className: "axis-input", value: f.categoria, onChange: set("categoria") }, CATEGORIAS_GASTO.map((c) => h("option", { key: c, value: c }, c)))),
-          h("label", { style: lbl }, h("b", { style: { color: INK } }, "Importe (€)"), h("input", { className: "axis-input", inputMode: "decimal", value: f.importe, onChange: set("importe"), placeholder: "0,00" })),
-          campoIva(f, set),
-          h("label", { style: lbl }, "Nº de factura (opcional)", h("input", { className: "axis-input", value: f.factura, onChange: set("factura") })),
-          h("label", { style: lbl }, "Notas (opcional)", h("input", { className: "axis-input", value: f.notas, onChange: set("notas") }))),
-        h("datalist", { id: "caja-g-conceptos" }, conceptos.map((c) => h("option", { key: c, value: c }))),
-        h("datalist", { id: "caja-g-proveedores" }, proveedores.map((c) => h("option", { key: c, value: c }))),
-        calc && h("p", { style: { margin: "10px 0 0", fontSize: 13 } }, "Base ", h("b", null, eurC(calc.base)), " + IVA ", h("b", null, eurC(calc.iva)), " = total ", h("b", null, eurC(calc.total))),
-        h("div", { style: { marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" } },
-          h("button", { className: "axis-btn primary", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar gasto"),
-          editId && h("button", { className: "axis-btn ghost", onClick: () => { setEditId(null); setF(vacioGasto()); } }, "Cancelar"),
-          msg.t && h("span", { style: { fontSize: 13, color: msg.ok ? GOOD : BAD } }, msg.t))),
-      h("section", { style: box },
-        h("div", { style: { display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 12 } },
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Gastado en el mes"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("total_cents"))), h("div", { style: { fontSize: 12, color: MUTED } }, `${delMes.length} gasto(s)`)),
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "Base imponible"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("base_cents")))),
-          h("div", null, h("div", { style: { fontSize: 12, color: MUTED } }, "IVA soportado"), h("div", { className: "axis-display", style: { fontSize: 28, fontWeight: 700 } }, eurC(suma("iva_cents"))))),
-        cats.length > 0 && h("div", { style: { display: "grid", gap: 5, margin: "0 0 14px" } },
-          h("div", { style: { fontSize: 12, color: MUTED, textTransform: "uppercase", letterSpacing: ".04em" } }, "Por categoría"),
-          cats.map(([c, v]) => h("div", { key: c, style: { display: "grid", gridTemplateColumns: "minmax(120px, 220px) 1fr 90px", gap: 8, alignItems: "center", fontSize: 12 } },
-            h("span", null, c), h("div", { style: { background: SOFT, borderRadius: 4, height: 8 } }, h("div", { style: { width: `${Math.max(2, v / maxCat * 100)}%`, background: BAR_OUT, height: 8, borderRadius: 4 } })), h("b", { style: { textAlign: "right" } }, eurC(v))))),
-        h("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 } },
-          h("input", { className: "axis-input", style: { maxWidth: 240 }, placeholder: "Buscar concepto, proveedor, factura…", value: fTexto, onChange: (e) => setFTexto(e.target.value), "aria-label": "Buscar gastos" }),
-          h("select", { className: "axis-input", style: { maxWidth: 240 }, value: fCat, onChange: (e) => setFCat(e.target.value), "aria-label": "Filtrar por categoría" }, h("option", { value: "" }, "Todas las categorías"), CATEGORIAS_GASTO.map((c) => h("option", { key: c, value: c }, c)))),
-        visibles.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, delMes.length ? "Ningún gasto coincide con el filtro." : "No hay gastos registrados en este mes.") : h("div", null, visibles.map(fila))));
+    const fila = (g) => h("div", { key: g.id, className: "cj-fila" },
+      h("div", { className: "cj-fecha" }, h("b", null, (g.fecha || "").slice(8, 10)), MESES[Number((g.fecha || "").slice(5, 7)) - 1]),
+      h("div", { style: { minWidth: 0 } },
+        h("div", { className: "cj-titulo" }, g.concepto),
+        h("div", { className: "cj-sub" }, [g.proveedor, g.factura && `Factura ${g.factura}`, g.notas].filter(Boolean).join(" · ")),
+        h("div", { className: "cj-chips" }, h("span", { className: "cj-chip mute" }, g.categoria))),
+      h("div", { className: "cj-importe" }, h("b", null, eurC(g.total_cents)), h("div", { className: "cj-hint" }, Number(g.iva_rate) === 0 ? "sin IVA" : `${eurC(g.base_cents)} + IVA ${Number(g.iva_rate)} %`)),
+      caja.puedeEditar && h("div", { className: "cj-acciones", style: { display: "flex" } },
+        h("button", { className: "cj-ico", title: "Editar", "aria-label": `Editar ${g.concepto}`, onClick: () => cargarEnForm(g, false) }, "✎"),
+        h("button", { className: "cj-ico", title: "Copiar con la fecha de hoy (p. ej. un gasto mensual)", "aria-label": `Duplicar ${g.concepto}`, onClick: () => cargarEnForm(g, true) }, "⧉"),
+        h("button", { className: "cj-ico", title: "Eliminar", disabled: busy, "aria-label": `Eliminar ${g.concepto}`, onClick: () => { if (window.confirm(`¿Eliminar el gasto "${g.concepto}" de ${eurC(g.total_cents)}?`)) ejecutar(() => caja.api.borrarGasto(g.id), "Gasto eliminado."); } }, "\u{1F5D1}")));
+    return h("div", { className: "cj-stack" },
+      caja.puedeEditar && h("section", { className: "cj-card" },
+        h("div", { className: "cj-between" },
+          h("h2", { className: "axis-display", style: { margin: 0, fontSize: 24, textTransform: "uppercase" } }, editId ? "Editar gasto" : "Registrar gasto"),
+          editId && h("button", { className: "cj-link", onClick: () => { setEditId(null); setF(vacioGasto()); } }, "Cancelar edición")),
+        h("p", { className: "cj-hint", style: { margin: "6px 0 14px" } }, "Salidas de dinero de la caja (en efectivo). Indica si el importe ya lleva IVA o hay que sumarlo: el panel separa base e IVA."),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Gasto"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Concepto", children: h("input", { className: "cj-input", list: "caja-g-conceptos", value: f.concepto, placeholder: "Ej. Material de limpieza", onChange: (e) => setF((a) => ({ ...a, concepto: e.target.value })) }) }),
+            Campo({ etiqueta: "Proveedor (opcional)", children: h("input", { className: "cj-input", list: "caja-g-proveedores", value: f.proveedor, onChange: (e) => setF((a) => ({ ...a, proveedor: e.target.value })) }) }),
+            Campo({ etiqueta: "Categoría", children: h("select", { className: "cj-input", value: f.categoria, onChange: (e) => setF((a) => ({ ...a, categoria: e.target.value })) }, CATEGORIAS_GASTO.map((c) => h("option", { key: c, value: c }, c))) }),
+            Campo({ etiqueta: "Fecha del gasto", children: h("input", { type: "date", className: "cj-input", value: f.fecha, onChange: (e) => setF((a) => ({ ...a, fecha: e.target.value })) }) })),
+          h("datalist", { id: "caja-g-conceptos" }, conceptos.map((c) => h("option", { key: c, value: c }))),
+          h("datalist", { id: "caja-g-proveedores" }, proveedores.map((c) => h("option", { key: c, value: c })))),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Importe"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Importe", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value })) }) }),
+            h(IvaControl, { iva: f.iva_rate, incluye: f.incluye_iva, onIva: (v) => setF((a) => ({ ...a, iva_rate: v })), onIncluye: (v) => setF((a) => ({ ...a, incluye_iva: v })) })),
+          h(Desglose, { calc })),
+        h("div", { className: "cj-sec" },
+          h("span", { className: "cj-eyebrow" }, "Detalles"),
+          h("div", { className: "cj-grid2" },
+            Campo({ etiqueta: "Nº de factura (opcional)", children: h("input", { className: "cj-input", value: f.factura, onChange: (e) => setF((a) => ({ ...a, factura: e.target.value })) }) }),
+            Campo({ etiqueta: "Notas (opcional)", children: h("input", { className: "cj-input", value: f.notas, onChange: (e) => setF((a) => ({ ...a, notas: e.target.value })) }) }))),
+        h("div", { style: { display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", paddingTop: 6 } },
+          h("button", { className: "cj-btn accent", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar gasto"),
+          h(Aviso, { msg }))),
+      h("section", { className: "cj-card" },
+        h("div", { className: "cj-between", style: { marginBottom: 16 } },
+          h("div", { className: "cj-kpi" },
+            h("div", null, h("div", { className: "cj-hint" }, "Gastado en el mes"), h("div", { className: "n" }, eurC(suma("total_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} gasto(s)`)),
+            h("div", null, h("div", { className: "cj-hint" }, "Base imponible"), h("div", { className: "n" }, eurC(suma("base_cents")))),
+            h("div", null, h("div", { className: "cj-hint" }, "IVA soportado"), h("div", { className: "n" }, eurC(suma("iva_cents"))))),
+          h(BarraMes, { month, setMonth })),
+        cats.length > 0 && h("div", { style: { display: "grid", gap: 8, margin: "0 0 18px" } },
+          h("span", { className: "cj-eyebrow" }, "Por categoría"),
+          cats.map(([c, v]) => h("div", { key: c, style: { display: "grid", gridTemplateColumns: "minmax(120px, 230px) 1fr 90px", gap: 10, alignItems: "center", fontSize: 13 } },
+            h("span", null, c), h("div", { style: { background: SOFT, borderRadius: 6, height: 10 } }, h("div", { style: { width: `${Math.max(2, v / maxCat * 100)}%`, background: BAR_OUT, height: 10, borderRadius: 6 } })), h("b", { style: { textAlign: "right" } }, eurC(v))))),
+        h("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 } },
+          h("input", { className: "cj-input", style: { maxWidth: 300, height: 42 }, placeholder: "Buscar concepto, proveedor, factura…", value: fTexto, onChange: (e) => setFTexto(e.target.value), "aria-label": "Buscar gastos" }),
+          h("select", { className: "cj-input", style: { maxWidth: 280, height: 42 }, value: fCat, onChange: (e) => setFCat(e.target.value), "aria-label": "Filtrar por categoría" }, h("option", { value: "" }, "Todas las categorías"), CATEGORIAS_GASTO.map((c) => h("option", { key: c, value: c }, c)))),
+        visibles.length === 0 ? h("p", { className: "cj-hint", style: { margin: 0 } }, delMes.length ? "Ningún gasto coincide con el filtro." : "No hay gastos registrados en este mes.") : h("div", null, visibles.map(fila))));
   }
 
   /* ---------- balance (caja de efectivo) ---------- */
@@ -586,7 +706,7 @@
     const col = (v) => (v > 0 ? BAR_IN : v < 0 ? BAD : INK);
     const ivaNeto = sel.ivaRep - sel.ivaSop;
 
-    return h("div", { style: { display: "grid", gap: 18 } },
+    return h("div", { className: "cj-stack" },
       h("div", { style: { display: "flex", gap: 12, flexWrap: "wrap" } },
         tarjeta("Efectivo en caja ahora", eurC(b.actual), col(b.actual), `a ${hoy}`),
         tarjeta(`Entradas · ${MESES[Number(sel.ym.slice(5)) - 1]}`, eurC(sel.ent), BAR_IN, "cobros del mes"),
@@ -640,52 +760,43 @@
         h("div", { style: { marginTop: 10, display: "flex", gap: 12, alignItems: "center" } }, h("button", { className: "axis-btn primary", onClick: guardarCfg }, "Guardar"), msg && h("span", { style: { fontSize: 13, color: GOOD } }, msg))));
   }
 
-  /* ---------- contenedor: acceso, cabecera y subpestañas ---------- */
+  /* ---------- contenedor: acceso, cabecera y pestañas ---------- */
+  const PESTANAS = [["pagos", "Cobros"], ["gastos", "Gastos"], ["balance", "Balance"], ["tarifas", "Tarifas"]];
   function CajaTab({ caja, month, setMonth }) {
     const [sub, setSub] = useState(() => { try { return localStorage.getItem("axis-caja-sub") || "pagos"; } catch (e) { return "pagos"; } });
     const elegir = (id) => { setSub(id); try { localStorage.setItem("axis-caja-sub", id); } catch (e) { /* sin guardar */ } };
+    const centrado = (...hijos) => h("div", { style: { maxWidth: 440, margin: "0 auto", padding: "56px 20px" } }, h("div", { className: "cj-card cj-stack", style: { gap: 18 } }, ...hijos));
 
-    if (caja.estado === "cargando") return h("div", { style: { padding: "18px 22px" } }, h("p", { style: { color: MUTED, fontSize: 13 } }, "Conectando con la Caja…"));
+    if (caja.estado === "cargando") return h("div", { style: { padding: "56px 20px", textAlign: "center", color: MUTED } }, "Conectando con la Caja…");
     if (caja.estado === "sin-sesion" || caja.estado === "error" && !caja.sesion) {
-      return h("div", { style: { padding: "0 22px 30px" } }, h("section", { style: box },
-        h("h2", { className: "axis-display", style: { margin: "0 0 6px", fontSize: 20, textTransform: "uppercase" } }, "Acceso"),
-        h("p", { style: { margin: "0 0 12px", fontSize: 13, color: MUTED } }, "Entra con tu usuario para ver y registrar los cobros, los gastos y el balance de la caja. Los cambios se ven al instante en todos los dispositivos."),
-        caja.error && h("p", { style: { fontSize: 13, color: BAD } }, caja.error),
-        caja.estado === "sin-sesion" && h(Login, { caja })));
+      return centrado(h(Marca), h("p", { className: "cj-hint", style: { margin: 0 } }, "Entra con tu usuario para ver y registrar los cobros, los gastos y el balance. Los cambios se ven al instante en todos los dispositivos."),
+        caja.error && h("div", { className: "cj-aviso mal" }, caja.error), caja.estado === "sin-sesion" && h(Login, { caja }));
     }
     if (caja.estado === "sin-acceso") {
-      return h("div", { style: { padding: "0 22px 30px" } }, h("section", { style: box },
-        h("p", { style: { margin: "0 0 10px", fontSize: 14 } }, `Has entrado como ${caja.sesion.user.email}, pero ese usuario no tiene acceso a la Caja. Pide que te añadan.`),
-        h("button", { className: "axis-btn ghost", onClick: () => caja.api.salir() }, "Salir")));
+      return centrado(h(Marca), h("p", { style: { margin: 0 } }, `Has entrado como ${caja.sesion.user.email}, pero ese usuario no tiene acceso a la Caja. Pide que te añadan.`), h("button", { className: "cj-btn sec", onClick: () => caja.api.salir() }, "Salir"));
     }
-    return h("div", { style: { padding: "0 22px 30px", display: "grid", gap: 18 } },
-      h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", paddingTop: 14 } },
-        sub !== "balance" && h(React.Fragment, null,
-          h("button", { className: "axis-btn ghost", onClick: () => setMonth(shiftMonth(month, -1)), "aria-label": "Mes anterior" }, "←"),
-          h("input", { type: "month", className: "axis-input", style: { width: 160 }, value: month, onChange: (e) => e.target.value && setMonth(e.target.value) }),
-          h("button", { className: "axis-btn ghost", onClick: () => setMonth(shiftMonth(month, 1)), "aria-label": "Mes siguiente" }, "→")),
-        h("span", { style: { marginLeft: "auto", fontSize: 12, color: caja.desactualizado ? WARN : MUTED } },
-          caja.desactualizado ? "⚠ Sin conexión con la Caja: datos guardados · " : caja.enVivo ? "● En tiempo real · " : "Conectando… · ",
-          caja.sesion.user.email, ` (${caja.rol}) `, h("button", { className: "axis-btn ghost", style: { padding: "2px 8px", marginLeft: 6 }, onClick: () => caja.api.salir() }, "Salir"))),
-      h("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
-        h("div", { role: "tablist", "aria-label": "Secciones de la Caja", style: { display: "flex", gap: 6, flexWrap: "wrap" } },
-          [["pagos", "Cobros"], ["gastos", "Gastos"], ["balance", "Balance"]].map(([id, t]) => h("button", { key: id, role: "tab", "aria-selected": sub === id, className: "axis-btn", onClick: () => elegir(id), style: { padding: "6px 16px", background: sub === id ? INK : "#fff", color: sub === id ? "#fff" : INK, border: "1px solid #C9D2CD" } }, t))),
-        h("button", { className: "axis-btn primary", style: { marginLeft: "auto" }, disabled: !caja.pagos.length && !caja.gastos.length, title: "Un único CSV con todos los cobros y gastos registrados, de todas las fechas", onClick: () => exportarTodo(caja) }, "⬇ Descargar CSV")),
-      caja.error && h("p", { style: { margin: 0, fontSize: 13, color: BAD } }, caja.error),
-      sub === "pagos" && h(PagosCaja, { caja, month }),
-      sub === "gastos" && h(GastosCaja, { caja, month }),
-      sub === "balance" && h(BalanceCaja, { caja, month, setMonth }));
+    return h("div", { style: { maxWidth: 1100, margin: "0 auto", padding: "0 22px 56px" } },
+      h("header", { className: "cj-between", style: { padding: "22px 0 4px" } },
+        h(Marca, null),
+        h("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } },
+          h("span", { style: { fontSize: 12.5, color: caja.desactualizado ? WARN : MUTED } }, caja.desactualizado ? "⚠ Sin conexión: datos guardados" : caja.enVivo ? "● En tiempo real" : "Conectando…", ` · ${caja.sesion.user.email} (${caja.rol})`),
+          h("button", { className: "cj-btn sec sm", disabled: !caja.pagos.length && !caja.gastos.length, title: "Un único CSV con todos los cobros y gastos registrados, de todas las fechas", onClick: () => exportarTodo(caja) }, "⬇ Descargar CSV"),
+          h("button", { className: "cj-link", style: { color: MUTED }, onClick: () => caja.api.salir() }, "Salir"))),
+      h("nav", { className: "cj-tabs", role: "tablist", "aria-label": "Secciones de la Caja", style: { marginBottom: 22 } }, PESTANAS.map(([id, t]) => h("button", { key: id, role: "tab", "aria-selected": sub === id, className: "cj-tab" + (sub === id ? " on" : ""), onClick: () => elegir(id) }, t))),
+      caja.error && h("div", { className: "cj-aviso mal", style: { marginBottom: 18 } }, caja.error),
+      sub === "pagos" && h(PagosCaja, { caja, month, setMonth }),
+      sub === "gastos" && h(GastosCaja, { caja, month, setMonth }),
+      sub === "balance" && h(BalanceCaja, { caja, month, setMonth }),
+      sub === "tarifas" && h(TarifasCaja, { caja }));
   }
 
   function App() {
     const caja = useCaja();
     const [month, setMonth] = useState(todayISO().slice(0, 7));
-    return h("div", { style: { maxWidth: 1100, margin: "0 auto" } },
-      h("header", { style: { padding: "18px 22px 0" } }, h("h1", { className: "axis-display", style: { margin: 0, fontSize: 26, textTransform: "uppercase" } }, "Caja de Axis")),
-      h(CajaTab, { caja, month, setMonth }));
+    return h(CajaTab, { caja, month, setMonth });
   }
 
-  window.CajaAxis = { calcIva, movimientos, calcularBalance, CajaTab, SelectorLista }; // para las pruebas
+  window.CajaAxis = { calcIva, movimientos, calcularBalance, CajaTab, SelectorLista };
   const raiz = document.getElementById("root");
   if (raiz) ReactDOM.createRoot(raiz).render(h(App));
 })();
