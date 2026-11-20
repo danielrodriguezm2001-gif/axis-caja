@@ -45,6 +45,8 @@
   const CONFIG_VACIA = { saldo_inicial_efectivo_cents: 0, saldo_inicial_fecha: null };
   const CATEGORIAS_GASTO = ["Alquiler", "Suministros (luz, agua, internet)", "Material y equipamiento", "Mantenimiento y limpieza", "Colaboradores y nóminas", "Seguros", "Gestoría y asesoría", "Software y suscripciones", "Marketing y publicidad", "Formación", "Impuestos y tasas", "Comisiones bancarias", "Otros"];
   const TIPOS_IVA = [21, 10, 4, 0];
+  // Fisioterapia, nutrición y psicología van sin IVA (exentos); el resto al 21 %.
+  const ivaPorDefecto = (nombre) => (/fisio|nutri|psico/.test(normName(nombre)) ? 0 : 21);
   const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
 
   // Reparto base / IVA / total en céntimos, sin que se pierda ninguno (total = base + IVA).
@@ -331,7 +333,7 @@
           h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Cliente"), h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) })),
           h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Producto / concepto"), h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar producto…", vacio: "Aún no hay conceptos: escribe uno para crearlo", nuevo: (t) => `+ Crear concepto «${t}»`,
             // Al elegir una tarifa de AimHarder se rellenan su precio e IVA habituales; un concepto nuevo/manual no existe en AimHarder.
-            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, ...(v ? { sin_aimharder: !item || item.origen === "manual" } : {}), ...(item ? { iva_rate: Number(item.iva_rate), importe: item.precio_cents && !String(a.importe).trim() ? String(item.precio_cents / 100).replace(".", ",") : a.importe } : {}) })) })),
+            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, ...(v ? { sin_aimharder: !item || item.origen === "manual" } : {}), ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), importe: item.precio_cents && !String(a.importe).trim() ? String(item.precio_cents / 100).replace(".", ",") : a.importe } : {}) })) })),
           h("label", { style: lbl }, h("b", { style: { color: INK } }, "Importe cobrado (€)"), h("input", { className: "axis-input", inputMode: "decimal", value: f.importe, onChange: set("importe"), placeholder: "0,00" })),
           campoIva(f, set),
           h("label", { style: lbl }, "Vendedor", h("select", { className: "axis-input", value: f.vendedor, onChange: set("vendedor") }, h("option", { value: "" }, "El que figure en AimHarder"), VENDEDORES.map((v) => h("option", { key: v, value: v }, v)))),
@@ -351,7 +353,7 @@
         delMes.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))),
       h("details", { style: box },
         h("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: 14 } }, `Conceptos y tarifas (${caja.conceptos.length})`),
-        h("p", { style: { margin: "10px 0", fontSize: 13, color: MUTED } }, "Las tarifas vienen de AimHarder (precio más habitual, con IVA incluido). El precio se propone al elegir el concepto y el IVA se aplica por defecto: ajusta aquí el IVA de cada servicio. Los conceptos nuevos se crean desde el desplegable al registrar un cobro."),
+        h("p", { style: { margin: "10px 0", fontSize: 13, color: MUTED } }, "Las tarifas vienen de AimHarder (precio más habitual, con IVA incluido). El precio se propone al elegir el concepto y el IVA se aplica por defecto (fisioterapia, nutrición y psicología sin IVA; el resto al 21 %). Puedes ajustar cada uno aquí. Los conceptos nuevos se crean desde el desplegable al registrar un cobro."),
         caja.conceptos.length === 0 ? h("p", { style: { fontSize: 13, color: MUTED, margin: 0 } }, "Aún no hay conceptos.") : h("div", null, caja.conceptos.map((k) => h(FilaConcepto, { key: k.id + ":" + k.precio_cents + ":" + k.iva_rate, caja, k })))));
   }
 
