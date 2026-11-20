@@ -306,7 +306,11 @@
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.cliente_nombre.trim() && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
     const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
-    const conceptoNuevo = f.concepto.trim() && !caja.conceptos.some((k) => k.nombre_norm === normName(f.concepto));
+    const tarifa = caja.conceptos.find((k) => k.nombre_norm === normName(f.concepto));
+    const conceptoNuevo = f.concepto.trim() && !tarifa;
+    const precioTarifa = tarifa && tarifa.precio_cents ? tarifa.precio_cents : null;
+    // El importe cobrado se puede cambiar siempre (descuentos, packs a medida…): la tarifa es solo una propuesta.
+    const distinto = precioTarifa != null && Number.isFinite(importe) && Math.round(importe * 100) !== precioTarifa;
     const editar = (c) => {
       setEditId(c.id);
       setF({ fecha: c.fecha, cliente_nombre: c.cliente_nombre, concepto: c.concepto, importe: String(c.importe_cents / 100).replace(".", ","), iva_rate: Number(c.iva_rate), incluye_iva: true, vendedor: c.vendedor, sin_aimharder: c.sin_aimharder, notas: c.notas });
@@ -341,6 +345,7 @@
           h("label", { style: lbl }, "Notas (opcional)", h("input", { className: "axis-input", value: f.notas, onChange: set("notas") }))),
         h("label", { style: { ...lbl, display: "flex", gap: 6, alignItems: "center", marginTop: 10 } }, h("input", { type: "checkbox", checked: f.sin_aimharder, onChange: set("sin_aimharder") }), "Cobro aparte, no existe en AimHarder (cuenta en la caja pero no cubre sesiones)"),
         calc && h("p", { style: { margin: "10px 0 0", fontSize: 13 } }, "Base ", h("b", null, eurC(calc.base)), " + IVA ", h("b", null, eurC(calc.iva)), " = total cobrado ", h("b", null, eurC(calc.total))),
+        precioTarifa != null && h("p", { style: { margin: "6px 0 0", fontSize: 12, color: distinto ? WARN : MUTED } }, `Tarifa: ${eurC(precioTarifa)} con IVA. El importe es editable: escribe lo que realmente se cobra.`, distinto && " (distinto de la tarifa)", distinto && h("button", { type: "button", className: "axis-btn ghost", style: { padding: "1px 8px", marginLeft: 8, fontSize: 12 }, onClick: () => setF((a) => ({ ...a, importe: String(precioTarifa / 100).replace(".", ","), importe_auto: true })) }, "Volver a la tarifa")),
         conceptoNuevo && h("p", { style: { margin: "6px 0 0", fontSize: 12, color: MUTED } }, "Concepto nuevo: se guardará en la lista con este IVA y este importe como habituales."),
         h("div", { style: { marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" } },
           h("button", { className: "axis-btn primary", onClick: () => guardar({ ...f, importe }), disabled: !valido || busy }, editId ? "Guardar cambios" : "Registrar cobro"),
