@@ -223,7 +223,8 @@
   const campoIva = (f, set) => [
     h("label", { key: "inc", style: lbl }, "El importe…", h("select", { className: "axis-input", value: f.incluye_iva ? "si" : "no", onChange: set("incluye_iva") }, h("option", { value: "si" }, "ya incluye el IVA (total)"), h("option", { value: "no" }, "es sin IVA (se suma)"))),
     h("label", { key: "iva", style: lbl }, "IVA (%)", h("select", { className: "axis-input", value: f.iva_rate, onChange: set("iva_rate") }, TIPOS_IVA.map((t) => h("option", { key: t, value: t }, t === 0 ? "0 % (exento)" : `${t} %`))))];
-  const setter = (f, setF) => (k) => (e) => setF({ ...f, [k]: k === "iva_rate" ? Number(e.target.value) : k === "incluye_iva" ? e.target.value === "si" : e.target.type === "checkbox" ? e.target.checked : e.target.value });
+  // Si el importe lo escribe la persona deja de ser el precio propuesto por el concepto (importe_auto).
+  const setter = (f, setF) => (k) => (e) => setF({ ...f, [k]: k === "iva_rate" ? Number(e.target.value) : k === "incluye_iva" ? e.target.value === "si" : e.target.type === "checkbox" ? e.target.checked : e.target.value, ...(k === "importe" ? { importe_auto: false } : {}) });
 
   function Login({ caja }) {
     const [email, setEmail] = useState("");
@@ -244,7 +245,7 @@
 
   // Desplegable de clientes con buscador: se escribe parte del nombre (en cualquier
   // orden) y se elige de la lista. Si no existe, ofrece crearlo.
-  function SelectorLista({ items, value, onChange, placeholder, nuevo, vacio }) {
+  function SelectorLista({ items, value, onChange, placeholder, nuevo, vacio, detalle }) {
     const [abierto, setAbierto] = useState(false);
     const [texto, setTexto] = useState("");
     const [activo, setActivo] = useState(0);
@@ -276,7 +277,7 @@
         opciones.length === 0 && h("div", { style: { padding: "8px 10px", fontSize: 13, color: MUTED } }, items.length ? "Sin resultados" : vacio),
         opciones.map((o, i) => h("div", { key: (o.nuevo ? "nuevo:" : "") + o.nombre, role: "option", "aria-selected": i === activo,
           onMouseDown: (e) => { e.preventDefault(); elegir(o); }, onMouseEnter: () => setActivo(i),
-          style: { padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === activo ? SOFT : "#fff", borderTop: o.nuevo && visibles.length ? `1px solid ${LINE}` : "none", fontWeight: o.nuevo ? 600 : 400 } }, o.nuevo ? nuevo(o.nombre) : o.nombre)),
+          style: { padding: "7px 10px", fontSize: 13, cursor: "pointer", background: i === activo ? SOFT : "#fff", borderTop: o.nuevo && visibles.length ? `1px solid ${LINE}` : "none", fontWeight: o.nuevo ? 600 : 400, display: "flex", justifyContent: "space-between", gap: 10 } }, o.nuevo ? nuevo(o.nombre) : o.nombre, !o.nuevo && detalle && h("span", { style: { fontWeight: 400, fontSize: 12, color: MUTED, whiteSpace: "nowrap" } }, detalle(o.item)))),
         coincidencias.length > visibles.length && h("div", { style: { padding: "6px 10px", fontSize: 12, color: MUTED, borderTop: `1px solid ${LINE}` } }, `Mostrando ${visibles.length} de ${coincidencias.length}: sigue escribiendo para filtrar`)));
   }
 
@@ -331,9 +332,9 @@
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 } },
           h("label", { style: lbl }, h("b", { style: { color: INK } }, "Fecha del cobro"), h("input", { type: "date", className: "axis-input", value: f.fecha, onChange: set("fecha") })),
           h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Cliente"), h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) })),
-          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Producto / concepto"), h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar producto…", vacio: "Aún no hay conceptos: escribe uno para crearlo", nuevo: (t) => `+ Crear concepto «${t}»`,
+          h("div", { style: lbl }, h("span", { style: { color: INK, fontWeight: 700 } }, "Producto / concepto"), h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar producto…", vacio: "Aún no hay conceptos: escribe uno para crearlo", nuevo: (t) => `+ Crear concepto «${t}»`, detalle: (k) => `${k.precio_cents ? eurC(k.precio_cents) : "sin precio"} · ${Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)}%`}`,
             // Al elegir una tarifa de AimHarder se rellenan su precio e IVA habituales; un concepto nuevo/manual no existe en AimHarder.
-            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, ...(v ? { sin_aimharder: !item || item.origen === "manual" } : {}), ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), importe: item.precio_cents && !String(a.importe).trim() ? String(item.precio_cents / 100).replace(".", ",") : a.importe } : {}) })) })),
+            onChange: (v, item) => setF((a) => ({ ...a, concepto: v, ...(v ? { sin_aimharder: !item || item.origen === "manual" } : {}), ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), ...(item.precio_cents && (!String(a.importe).trim() || a.importe_auto) ? { importe: String(item.precio_cents / 100).replace(".", ","), importe_auto: true } : {}) } : {}) })) })),
           h("label", { style: lbl }, h("b", { style: { color: INK } }, "Importe cobrado (€)"), h("input", { className: "axis-input", inputMode: "decimal", value: f.importe, onChange: set("importe"), placeholder: "0,00" })),
           campoIva(f, set),
           h("label", { style: lbl }, "Vendedor", h("select", { className: "axis-input", value: f.vendedor, onChange: set("vendedor") }, h("option", { value: "" }, "El que figure en AimHarder"), VENDEDORES.map((v) => h("option", { key: v, value: v }, v)))),
