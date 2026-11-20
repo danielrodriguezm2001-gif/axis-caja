@@ -494,6 +494,18 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
   const num = (c) => (c / 100).toFixed(2).replace(".", ",");
+  // Un texto que empiece por = + - @ lo ejecutaría Excel como fórmula: se neutraliza con un apóstrofo.
+  const txt = (s) => { const t = String(s == null ? "" : s); return /^[=+\-@]/.test(t) ? "'" + t : t; };
+
+  // Todos los cobros y gastos registrados (todas las fechas) en un solo CSV.
+  function exportarTodo(caja) {
+    const cabecera = ["Fecha", "Tipo", "Concepto", "Cliente / proveedor", "Categoría", "Base", "IVA %", "IVA", "Total", "Vendedor", "Nº factura", "Sin AimHarder", "Notas", "Registrado por", "Alta"];
+    const filas = [
+      ...caja.pagos.map((c) => [c.fecha, "Cobro", txt(c.concepto), txt(c.cliente_nombre), "", num(c.base_cents), Number(c.iva_rate), num(c.iva_cents), num(c.importe_cents), txt(c.vendedor), "", c.sin_aimharder ? "Sí" : "No", txt(c.notas), txt(c.creado_por), (c.created_at || "").slice(0, 10)]),
+      ...caja.gastos.map((g) => [g.fecha, "Gasto", txt(g.concepto), txt(g.proveedor), txt(g.categoria), num(g.base_cents), Number(g.iva_rate), num(g.iva_cents), num(g.total_cents), "", txt(g.factura), "", txt(g.notas), txt(g.creado_por), (g.created_at || "").slice(0, 10)])
+    ].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+    descargarCSV(`caja-axis-${todayISO()}.csv`, [cabecera, ...filas]);
+  }
 
   function BalanceCaja({ caja, month, setMonth }) {
     const [cfg, setCfg] = useState({ efectivo: "", fecha: "" });
@@ -621,8 +633,10 @@
         h("span", { style: { marginLeft: "auto", fontSize: 12, color: caja.desactualizado ? WARN : MUTED } },
           caja.desactualizado ? "⚠ Sin conexión con la Caja: datos guardados · " : caja.enVivo ? "● En tiempo real · " : "Conectando… · ",
           caja.sesion.user.email, ` (${caja.rol}) `, h("button", { className: "axis-btn ghost", style: { padding: "2px 8px", marginLeft: 6 }, onClick: () => caja.api.salir() }, "Salir"))),
-      h("div", { role: "tablist", "aria-label": "Secciones de la Caja", style: { display: "flex", gap: 6, flexWrap: "wrap" } },
-        [["pagos", "Cobros"], ["gastos", "Gastos"], ["balance", "Balance"]].map(([id, t]) => h("button", { key: id, role: "tab", "aria-selected": sub === id, className: "axis-btn", onClick: () => elegir(id), style: { padding: "6px 16px", background: sub === id ? INK : "#fff", color: sub === id ? "#fff" : INK, border: "1px solid #C9D2CD" } }, t))),
+      h("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" } },
+        h("div", { role: "tablist", "aria-label": "Secciones de la Caja", style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+          [["pagos", "Cobros"], ["gastos", "Gastos"], ["balance", "Balance"]].map(([id, t]) => h("button", { key: id, role: "tab", "aria-selected": sub === id, className: "axis-btn", onClick: () => elegir(id), style: { padding: "6px 16px", background: sub === id ? INK : "#fff", color: sub === id ? "#fff" : INK, border: "1px solid #C9D2CD" } }, t))),
+        h("button", { className: "axis-btn primary", style: { marginLeft: "auto" }, disabled: !caja.pagos.length && !caja.gastos.length, title: "Un único CSV con todos los cobros y gastos registrados, de todas las fechas", onClick: () => exportarTodo(caja) }, "⬇ Descargar CSV")),
       caja.error && h("p", { style: { margin: 0, fontSize: 13, color: BAD } }, caja.error),
       sub === "pagos" && h(PagosCaja, { caja, month }),
       sub === "gastos" && h(GastosCaja, { caja, month }),
