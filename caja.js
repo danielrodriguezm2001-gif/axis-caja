@@ -44,9 +44,6 @@
 
   const CONFIG_VACIA = { saldo_inicial_efectivo_cents: 0, saldo_inicial_fecha: null };
   const CATEGORIAS_GASTO = ["Alquiler", "Suministros (luz, agua, internet)", "Material y equipamiento", "Mantenimiento y limpieza", "Colaboradores y nóminas", "Seguros", "Gestoría y asesoría", "Software y suscripciones", "Marketing y publicidad", "Formación", "Impuestos y tasas", "Comisiones bancarias", "Otros"];
-  const TIPOS_IVA = [21, 10, 4, 0];
-  // Fisioterapia, nutrición y psicología van sin IVA (exentos); el resto al 21 %.
-  const ivaPorDefecto = (nombre) => (/fisio|nutri|psico/.test(normName(nombre)) ? 0 : 21);
 
   // Servicios que puede incluir una tarifa: los que el panel sabe gastar con las sesiones de AimHarder.
   // Cada línea de una tarifa o de un cobro: { fam, n, valor, generico }
@@ -59,16 +56,6 @@
   const copiarServicios = (ls) => (Array.isArray(ls) ? ls.map((l) => ({ fam: l.fam, n: l.n, valor: l.valor == null ? "" : String(l.valor).replace(".", ","), generico: !!l.generico })) : []);
   const resumenServicios = (ls) => { const l = limpiarServicios(ls); return l.length ? l.map((x) => `${x.n} ${FAM_CORTA[x.fam] || x.fam}`).join(" + ") : "Sin sesiones"; };
   const MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
-
-  // Reparto base / IVA / total en céntimos, sin que se pierda ninguno (total = base + IVA).
-  function calcIva(importe, tasa, incluyeIva) {
-    if (incluyeIva) {
-      const total = Math.round(importe * 100), base = Math.round(total / (1 + tasa / 100));
-      return { base, iva: total - base, total };
-    }
-    const base = Math.round(importe * 100), iva = Math.round(base * tasa / 100);
-    return { base, iva, total: base + iva };
-  }
 
   /* ---------- conexión: sesión, datos y tiempo real ---------- */
   function useCaja() {
@@ -174,22 +161,22 @@
         const servicios = limpiarServicios(d.servicios);
         const nombreConcepto = d.concepto.trim();
         if (!conceptosRef.current.some((k) => k.nombre_norm === normName(nombreConcepto))) {
-          // Concepto nuevo: queda guardado (como manual) con este IVA y este importe como habituales.
-          const { error: e } = await sb.from("caja_conceptos").upsert({ nombre: nombreConcepto, nombre_norm: normName(nombreConcepto), precio_cents: Math.round(d.importe * 100), iva_rate: d.iva_rate, origen: "manual", servicios }, { onConflict: "nombre_norm", ignoreDuplicates: true });
+          // Concepto nuevo: queda guardado (como manual) con este importe y estas sesiones como habituales.
+          const { error: e } = await sb.from("caja_conceptos").upsert({ nombre: nombreConcepto, nombre_norm: normName(nombreConcepto), precio_cents: Math.round(d.importe * 100), origen: "manual", servicios }, { onConflict: "nombre_norm", ignoreDuplicates: true });
           if (e) throw e;
         }
-        const c = calcIva(d.importe, d.iva_rate, d.incluye_iva);
-        // Caja de efectivo: solo cobros, siempre en efectivo.
-        const fila = { cliente_id: cliente.id, cliente_nombre: cliente.nombre, concepto: d.concepto.trim(), importe_cents: c.total, base_cents: c.base, iva_rate: d.iva_rate, iva_cents: c.iva, fecha: d.fecha, forma_pago: "efectivo", estado: "cobrado", vendedor: d.vendedor, sin_aimharder: !!d.sin_aimharder, servicios, notas: d.notas.trim(), updated_at: new Date().toISOString() };
+        // Caja de efectivo: solo cobros, siempre en efectivo. Los importes son totales (sin IVA).
+        const total = Math.round(d.importe * 100);
+        const fila = { cliente_id: cliente.id, cliente_nombre: cliente.nombre, concepto: d.concepto.trim(), importe_cents: total, base_cents: total, iva_rate: 0, iva_cents: 0, fecha: d.fecha, forma_pago: "efectivo", estado: "cobrado", vendedor: d.vendedor, sin_aimharder: !!d.sin_aimharder, servicios, notas: d.notas.trim(), updated_at: new Date().toISOString() };
         const r = id ? await sb.from("caja_pagos").update(fila).eq("id", id) : await sb.from("caja_pagos").insert({ ...fila, creado_por: sesion.user.email });
         if (r.error) throw r.error;
         await cargar();
       },
-      // d: { fecha, concepto, proveedor, categoria, importe, iva_rate, incluye_iva, factura, notas }
+      // d: { fecha, concepto, proveedor, categoria, importe (total), factura, notas }
       async guardarGasto(d, id) {
         if (!puedeEditar) throw new Error("Tu usuario solo puede ver la Caja.");
-        const c = calcIva(d.importe, d.iva_rate, d.incluye_iva);
-        const fila = { fecha: d.fecha, concepto: d.concepto.trim(), proveedor: d.proveedor.trim(), categoria: d.categoria, base_cents: c.base, iva_rate: d.iva_rate, iva_cents: c.iva, total_cents: c.total, forma_pago: "efectivo", estado: "pagado", factura: d.factura.trim(), notas: d.notas.trim(), updated_at: new Date().toISOString() };
+        const total = Math.round(d.importe * 100);
+        const fila = { fecha: d.fecha, concepto: d.concepto.trim(), proveedor: d.proveedor.trim(), categoria: d.categoria, base_cents: total, iva_rate: 0, iva_cents: 0, total_cents: total, forma_pago: "efectivo", estado: "pagado", factura: d.factura.trim(), notas: d.notas.trim(), updated_at: new Date().toISOString() };
         const r = id ? await sb.from("caja_gastos").update(fila).eq("id", id) : await sb.from("caja_gastos").insert({ ...fila, creado_por: sesion.user.email });
         if (r.error) throw r.error;
         await cargar();
@@ -210,7 +197,7 @@
         const nombre = String(d.nombre || "").trim();
         if (!nombre) throw new Error("Pon un nombre a la tarifa.");
         if (conceptosRef.current.some((k) => k.nombre_norm === normName(nombre))) throw new Error("Ya existe una tarifa con ese nombre.");
-        const { error: e } = await sb.from("caja_conceptos").insert({ nombre, nombre_norm: normName(nombre), precio_cents: d.precio_cents, iva_rate: d.iva_rate, origen: "manual", servicios: d.servicios });
+        const { error: e } = await sb.from("caja_conceptos").insert({ nombre, nombre_norm: normName(nombre), precio_cents: d.precio_cents, origen: "manual", servicios: d.servicios });
         if (e) throw e;
         await cargar();
       },
@@ -239,8 +226,8 @@
   const lbl = { fontSize: 12, color: MUTED, display: "grid", gap: 3 };
   const eurC = (cents) => eur2((cents || 0) / 100);
   const BAR_IN = "#2F7D4F", BAR_OUT = "#B23A3A";
-  const vacio = () => ({ fecha: todayISO(), cliente_nombre: "", concepto: "", importe: "", iva_rate: 21, incluye_iva: true, vendedor: "", sin_aimharder: true, servicios: [], notas: "" });
-  const vacioGasto = () => ({ fecha: todayISO(), concepto: "", proveedor: "", categoria: CATEGORIAS_GASTO[0], importe: "", iva_rate: 21, incluye_iva: true, factura: "", notas: "" });
+  const vacio = () => ({ fecha: todayISO(), cliente_nombre: "", concepto: "", importe: "", vendedor: "", sin_aimharder: true, servicios: [], notas: "" });
+  const vacioGasto = () => ({ fecha: todayISO(), concepto: "", proveedor: "", categoria: CATEGORIAS_GASTO[0], importe: "", factura: "", notas: "" });
   const diaMes = (iso) => `${(iso || "").slice(8, 10)} ${MESES[Number((iso || "").slice(5, 7)) - 1] || ""}`.trim();
 
   /* --- piezas reutilizables --- */
@@ -275,18 +262,6 @@
   }
   function Marca({ children }) {
     return h("div", { style: { display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" } }, h("h1", { className: "axis-display", style: { margin: 0, fontSize: 28, textTransform: "uppercase" } }, "Caja de Axis"), children);
-  }
-
-  // IVA: píldoras con el tipo y selector de si el importe ya lo incluye.
-  function IvaControl({ iva, incluye, onIva, onIncluye }) {
-    return h("div", { className: "cj-stack", style: { gap: 14 } },
-      Campo({ etiqueta: "IVA", children: h(Pills, { opciones: TIPOS_IVA.map((t) => [t, t === 0 ? "Exento" : `${t} %`]), valor: iva, onChange: onIva }) }),
-      Campo({ etiqueta: "El importe…", children: h(Segmentado, { opciones: [[true, "Incluye IVA"], [false, "Sin IVA (se suma)"]], valor: incluye, onChange: onIncluye }) }));
-  }
-  function Desglose({ calc }) {
-    return calc ? h("div", { className: "cj-desglose", "aria-live": "polite" },
-      h("span", { className: "k" }, "Base"), h("span", { className: "k" }, "IVA"), h("span", { className: "k" }, "Total"),
-      h("span", { className: "v" }, eurC(calc.base)), h("span", { className: "v" }, eurC(calc.iva)), h("span", { className: "t" }, eurC(calc.total))) : null;
   }
 
   // Desplegable con buscador (clientes, tarifas): se escribe parte del nombre, en cualquier orden.
@@ -379,7 +354,7 @@
     };
     const guardar = async (datos) => {
       const ok = await ejecutar(() => guardarFn(datos, editId), editId ? okEdicion : okNuevo);
-      if (ok) { setEditId(null); setF({ ...inicial(), fecha: f.fecha, iva_rate: f.iva_rate, vendedor: f.vendedor, categoria: f.categoria }); }
+      if (ok) { setEditId(null); setF({ ...inicial(), fecha: f.fecha, vendedor: f.vendedor, categoria: f.categoria }); }
     };
     return { f, setF, editId, setEditId, msg, busy, ejecutar, guardar };
   }
@@ -390,7 +365,6 @@
     const [verSesiones, setVerSesiones] = useState(false);
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.cliente_nombre.trim() && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
-    const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
     const tarifa = caja.conceptos.find((k) => k.nombre_norm === normName(f.concepto));
     const conceptoNuevo = f.concepto.trim() && !tarifa;
     const precioTarifa = tarifa && tarifa.precio_cents ? tarifa.precio_cents : null;
@@ -398,7 +372,7 @@
     const distinto = precioTarifa != null && Number.isFinite(importe) && Math.round(importe * 100) !== precioTarifa;
     const editar = (c) => {
       setEditId(c.id); setVerSesiones(false);
-      setF({ fecha: c.fecha, cliente_nombre: c.cliente_nombre, concepto: c.concepto, importe: String(c.importe_cents / 100).replace(".", ","), iva_rate: Number(c.iva_rate), incluye_iva: true, vendedor: c.vendedor, sin_aimharder: c.sin_aimharder, servicios: copiarServicios(c.servicios), notas: c.notas });
+      setF({ fecha: c.fecha, cliente_nombre: c.cliente_nombre, concepto: c.concepto, importe: String(c.importe_cents / 100).replace(".", ","), vendedor: c.vendedor, sin_aimharder: c.sin_aimharder, servicios: copiarServicios(c.servicios), notas: c.notas });
       window.scrollTo({ top: 0, behavior: "smooth" });
     };
     const delMes = caja.pagos.filter((c) => (c.fecha || "").startsWith(month)).sort((a, b) => b.fecha.localeCompare(a.fecha));
@@ -409,7 +383,7 @@
         h("div", { className: "cj-titulo" }, c.concepto),
         h("div", { className: "cj-sub" }, [c.cliente_nombre, c.vendedor, c.notas].filter(Boolean).join(" · ")),
         h(ChipsServicios, { servicios: c.servicios })),
-      h("div", { className: "cj-importe" }, h("b", null, eurC(c.importe_cents)), h("div", { className: "cj-hint" }, Number(c.iva_rate) === 0 ? "sin IVA" : `${eurC(c.base_cents)} + IVA ${Number(c.iva_rate)} %`)),
+      h("div", { className: "cj-importe" }, h("b", null, eurC(c.importe_cents))),
       caja.puedeEditar && h("div", { className: "cj-acciones", style: { display: "flex" } },
         h("button", { className: "cj-ico", title: "Editar", "aria-label": `Editar ${c.concepto}`, onClick: () => editar(c) }, "✎"),
         h("button", { className: "cj-ico", title: "Eliminar", disabled: busy, "aria-label": `Eliminar ${c.concepto}`, onClick: () => { if (window.confirm(`¿Eliminar el cobro "${c.concepto}" de ${eurC(c.importe_cents)}?`)) ejecutar(() => caja.api.borrarPago(c.id), "Cobro eliminado."); } }, "\u{1F5D1}")));
@@ -423,22 +397,20 @@
           h("span", { className: "cj-eyebrow" }, "Cliente y tarifa"),
           h("div", { className: "cj-grid2" },
             Campo({ etiqueta: "Cliente", children: h(SelectorLista, { items: caja.clientes, value: f.cliente_nombre, placeholder: "Buscar cliente…", vacio: "Aún no hay clientes: escribe un nombre para crearlo", nuevo: (t) => `+ Crear cliente «${t}»`, onChange: (v) => setF((a) => ({ ...a, cliente_nombre: v })) }) }),
-            Campo({ etiqueta: "Tarifa", children: h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar tarifa…", vacio: "Aún no hay tarifas: escribe un nombre para crear una", nuevo: (t) => `+ Crear tarifa «${t}»`, detalle: (k) => `${k.precio_cents ? eurC(k.precio_cents) : "sin precio"} · ${Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)} %`}`,
-              // Al elegir una tarifa se rellenan su precio, su IVA y sus sesiones; un concepto nuevo parte sin sesiones.
-              onChange: (v, item) => setF((a) => ({ ...a, concepto: v, servicios: item ? copiarServicios(item.servicios) : [], ...(!item && v ? { iva_rate: ivaPorDefecto(v) } : {}), ...(item ? { iva_rate: Number(item.iva_rate), ...(item.precio_cents && (!String(a.importe).trim() || a.importe_auto) ? { importe: String(item.precio_cents / 100).replace(".", ","), importe_auto: true } : {}) } : {}) })) }) })),
+            Campo({ etiqueta: "Tarifa", children: h(SelectorLista, { items: caja.conceptos, value: f.concepto, placeholder: "Buscar tarifa…", vacio: "Aún no hay tarifas: escribe un nombre para crear una", nuevo: (t) => `+ Crear tarifa «${t}»`, detalle: (k) => (k.precio_cents ? eurC(k.precio_cents) : "sin precio"),
+              // Al elegir una tarifa se rellenan su precio y sus sesiones; un concepto nuevo parte sin sesiones.
+              onChange: (v, item) => setF((a) => ({ ...a, concepto: v, servicios: item ? copiarServicios(item.servicios) : [], ...(item ? { ...(item.precio_cents && (!String(a.importe).trim() || a.importe_auto) ? { importe: String(item.precio_cents / 100).replace(".", ","), importe_auto: true } : {}) } : {}) })) }) })),
           f.concepto.trim() && h("div", { className: "cj-stack", style: { gap: 12 } },
             h("div", { className: "cj-between" },
               h("span", { className: "cj-label" }, conceptoNuevo ? "Tarifa nueva · sesiones que incluye" : "Sesiones que incluye"),
               !conceptoNuevo && h("button", { className: "cj-link", onClick: () => setVerSesiones(!verSesiones) }, verSesiones ? "Listo" : "Editar sesiones")),
             conceptoNuevo || verSesiones ? h(ServiciosPills, { lineas: f.servicios, onChange: (servicios) => setF((a) => ({ ...a, servicios })) }) : h(ChipsServicios, { servicios: f.servicios }),
-            conceptoNuevo && h("span", { className: "cj-hint" }, "Se guardará en Tarifas con este precio, IVA y sesiones como habituales."))),
+            conceptoNuevo && h("span", { className: "cj-hint" }, "Se guardará en Tarifas con este precio y estas sesiones como habituales."))),
         h("div", { className: "cj-sec" },
           h("span", { className: "cj-eyebrow" }, "Importe"),
-          h("div", { className: "cj-grid2" },
-            Campo({ etiqueta: "Importe cobrado", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe cobrado", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value, importe_auto: false })) }) }),
-            h(IvaControl, { iva: f.iva_rate, incluye: f.incluye_iva, onIva: (v) => setF((a) => ({ ...a, iva_rate: v })), onIncluye: (v) => setF((a) => ({ ...a, incluye_iva: v })) })),
-          h(Desglose, { calc }),
-          precioTarifa != null && h("div", { className: "cj-hint", style: { color: distinto ? WARN : MUTED } }, `Tarifa: ${eurC(precioTarifa)} con IVA. El importe es editable: escribe lo que realmente se cobra.`, distinto && " Es distinto de la tarifa. ", distinto && h("button", { type: "button", className: "cj-link", onClick: () => setF((a) => ({ ...a, importe: String(precioTarifa / 100).replace(".", ","), importe_auto: true })) }, "Volver a la tarifa"))),
+          h("div", { style: { maxWidth: 360 } },
+            Campo({ etiqueta: "Importe cobrado (total)", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe cobrado", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value, importe_auto: false })) }) })),
+          precioTarifa != null && h("div", { className: "cj-hint", style: { color: distinto ? WARN : MUTED } }, `Tarifa: ${eurC(precioTarifa)}. El importe es editable: escribe lo que realmente se cobra.`, distinto && " Es distinto de la tarifa. ", distinto && h("button", { type: "button", className: "cj-link", onClick: () => setF((a) => ({ ...a, importe: String(precioTarifa / 100).replace(".", ","), importe_auto: true })) }, "Volver a la tarifa"))),
         h("div", { className: "cj-sec" },
           h("span", { className: "cj-eyebrow" }, "Detalles"),
           h("div", { className: "cj-grid2" },
@@ -451,9 +423,7 @@
       h("section", { className: "cj-card" },
         h("div", { className: "cj-between", style: { marginBottom: 16 } },
           h("div", { className: "cj-kpi" },
-            h("div", null, h("div", { className: "cj-hint" }, "Cobrado en el mes"), h("div", { className: "n" }, eurC(suma("importe_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} cobro(s)`)),
-            h("div", null, h("div", { className: "cj-hint" }, "Base imponible"), h("div", { className: "n" }, eurC(suma("base_cents")))),
-            h("div", null, h("div", { className: "cj-hint" }, "IVA repercutido"), h("div", { className: "n" }, eurC(suma("iva_cents"))))),
+            h("div", null, h("div", { className: "cj-hint" }, "Cobrado en el mes"), h("div", { className: "n" }, eurC(suma("importe_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} cobro(s)`))),
           h(BarraMes, { month, setMonth })),
         delMes.length === 0 ? h("p", { className: "cj-hint", style: { margin: 0 } }, "No hay cobros registrados en este mes.") : h("div", null, delMes.map(fila))));
   }
@@ -464,7 +434,6 @@
     const [tab, setTab] = useState("datos");
     const [nombre, setNombre] = useState(k ? k.nombre : "");
     const [precio, setPrecio] = useState(k && k.precio_cents != null ? String(k.precio_cents / 100).replace(".", ",") : "");
-    const [iva, setIva] = useState(k ? Number(k.iva_rate) : 21);
     const [servicios, setServicios] = useState(() => copiarServicios(k ? k.servicios : []));
     const [msg, setMsg] = useState({ ok: true, t: "" });
     const [busy, setBusy] = useState(false);
@@ -473,8 +442,8 @@
     const guardar = async () => {
       setBusy(true); setMsg({ ok: true, t: "Guardando…" });
       try {
-        if (nueva) await caja.api.crearConcepto({ nombre, precio_cents: cents, iva_rate: iva, servicios: limpiarServicios(servicios) });
-        else await caja.api.actualizarConcepto(k.id, { ...(bloqueado ? {} : { nombre: nombre.trim(), nombre_norm: normName(nombre) }), precio_cents: cents, iva_rate: iva, servicios: limpiarServicios(servicios) });
+        if (nueva) await caja.api.crearConcepto({ nombre, precio_cents: cents, servicios: limpiarServicios(servicios) });
+        else await caja.api.actualizarConcepto(k.id, { ...(bloqueado ? {} : { nombre: nombre.trim(), nombre_norm: normName(nombre) }), precio_cents: cents, servicios: limpiarServicios(servicios) });
         onVolver();
       } catch (e) { setMsg({ ok: false, t: "No se ha guardado: " + (e.message || e) }); } finally { setBusy(false); }
     };
@@ -498,8 +467,7 @@
             ? [
               h("span", { key: "e", className: "cj-eyebrow" }, "Datos de la tarifa"),
               Campo({ key: "n", etiqueta: "Nombre", ayuda: bloqueado ? "Es una tarifa de AimHarder: el nombre debe coincidir con el de allí." : "Así saldrá al elegirla en un cobro.", children: h("input", { className: "cj-input", value: nombre, disabled: bloqueado || !caja.puedeEditar, onChange: (e) => setNombre(e.target.value), placeholder: "Ej. Bono 4 sesiones - FISIOTERAPIA" }) }),
-              Campo({ key: "p", etiqueta: "Precio", ayuda: "Con IVA incluido. Se propone al cobrarla y se puede cambiar en cada cobro.", children: h(InputEuro, { value: precio, etiqueta: "Precio", style: { maxWidth: 240 }, onChange: (e) => setPrecio(e.target.value) }) }),
-              Campo({ key: "i", etiqueta: "IVA", ayuda: "Fisioterapia, nutrición y psicología van sin IVA; el resto al 21 %.", children: h(Pills, { opciones: TIPOS_IVA.map((t) => [t, t === 0 ? "Exento" : `${t} %`]), valor: iva, onChange: setIva }) })]
+              Campo({ key: "p", etiqueta: "Precio", ayuda: "Importe total. Se propone al cobrarla y se puede cambiar en cada cobro.", children: h(InputEuro, { value: precio, etiqueta: "Precio", style: { maxWidth: 240 }, onChange: (e) => setPrecio(e.target.value) }) })]
             : [
               h("span", { key: "e", className: "cj-eyebrow" }, "Clases incluidas"),
               h("p", { key: "d", className: "cj-hint", style: { margin: 0 } }, "Qué sesiones da esta tarifa. Al cobrarla, el panel las convierte en el bono del cliente y las gasta con sus sesiones de AimHarder."),
@@ -518,11 +486,11 @@
       h("div", { className: "cj-between" },
         h("input", { className: "cj-input", style: { maxWidth: 360 }, placeholder: "Buscar tarifa…", value: q, onChange: (e) => setQ(e.target.value), "aria-label": "Buscar tarifa" }),
         caja.puedeEditar && h("button", { className: "cj-btn accent", onClick: () => setVista({ modo: "editor", k: null }) }, "+ Nueva tarifa")),
-      h("p", { className: "cj-hint", style: { margin: 0 } }, `${caja.conceptos.length} tarifas. Cada una tiene su precio, su IVA y las sesiones que incluye por servicio; pulsa una para editarla.`),
+      h("p", { className: "cj-hint", style: { margin: 0 } }, `${caja.conceptos.length} tarifas. Cada una tiene su precio y las sesiones que incluye por servicio; pulsa una para editarla.`),
       items.length === 0 ? h("div", { className: "cj-card" }, h("p", { className: "cj-hint", style: { margin: 0 } }, "Ninguna tarifa coincide.")) :
         h("div", { className: "cj-tarifas" }, items.map((k) => h("button", { key: k.id, className: "cj-tarifa", onClick: () => setVista({ modo: "editor", k }) },
           h("div", { className: "cj-between", style: { alignItems: "flex-start" } }, h("h3", null, k.nombre), h("span", { className: "cj-chip mute" }, k.origen === "manual" ? "Manual" : "AimHarder")),
-          h("div", { style: { display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" } }, h("span", { className: "precio" }, k.precio_cents != null ? eurC(k.precio_cents) : "—"), h("span", { className: "cj-chip " + (Number(k.iva_rate) === 0 ? "warn" : "mute") }, Number(k.iva_rate) === 0 ? "sin IVA" : `IVA ${Number(k.iva_rate)} %`)),
+          h("div", { style: { display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" } }, h("span", { className: "precio" }, k.precio_cents != null ? eurC(k.precio_cents) : "—")),
           h(ChipsServicios, { servicios: k.servicios })))));
   }
 
@@ -533,10 +501,9 @@
     const [fTexto, setFTexto] = useState("");
     const importe = parseFloat(String(f.importe).replace(",", "."));
     const valido = f.fecha && f.concepto.trim() && Number.isFinite(importe) && importe > 0;
-    const calc = valido ? calcIva(importe, f.iva_rate, f.incluye_iva) : null;
     const cargarEnForm = (g, duplicar) => {
       setEditId(duplicar ? null : g.id);
-      setF({ fecha: duplicar ? todayISO() : g.fecha, concepto: g.concepto, proveedor: g.proveedor, categoria: g.categoria, importe: String(g.total_cents / 100).replace(".", ","), iva_rate: Number(g.iva_rate), incluye_iva: true, factura: duplicar ? "" : g.factura, notas: g.notas });
+      setF({ fecha: duplicar ? todayISO() : g.fecha, concepto: g.concepto, proveedor: g.proveedor, categoria: g.categoria, importe: String(g.total_cents / 100).replace(".", ","), factura: duplicar ? "" : g.factura, notas: g.notas });
       window.scrollTo({ top: 0, behavior: "smooth" });
     };
     const delMes = caja.gastos.filter((g) => (g.fecha || "").startsWith(month));
@@ -554,7 +521,7 @@
         h("div", { className: "cj-titulo" }, g.concepto),
         h("div", { className: "cj-sub" }, [g.proveedor, g.factura && `Factura ${g.factura}`, g.notas].filter(Boolean).join(" · ")),
         h("div", { className: "cj-chips" }, h("span", { className: "cj-chip mute" }, g.categoria))),
-      h("div", { className: "cj-importe" }, h("b", null, eurC(g.total_cents)), h("div", { className: "cj-hint" }, Number(g.iva_rate) === 0 ? "sin IVA" : `${eurC(g.base_cents)} + IVA ${Number(g.iva_rate)} %`)),
+      h("div", { className: "cj-importe" }, h("b", null, eurC(g.total_cents))),
       caja.puedeEditar && h("div", { className: "cj-acciones", style: { display: "flex" } },
         h("button", { className: "cj-ico", title: "Editar", "aria-label": `Editar ${g.concepto}`, onClick: () => cargarEnForm(g, false) }, "✎"),
         h("button", { className: "cj-ico", title: "Copiar con la fecha de hoy (p. ej. un gasto mensual)", "aria-label": `Duplicar ${g.concepto}`, onClick: () => cargarEnForm(g, true) }, "⧉"),
@@ -564,7 +531,7 @@
         h("div", { className: "cj-between" },
           h("h2", { className: "axis-display", style: { margin: 0, fontSize: 24, textTransform: "uppercase" } }, editId ? "Editar gasto" : "Registrar gasto"),
           editId && h("button", { className: "cj-link", onClick: () => { setEditId(null); setF(vacioGasto()); } }, "Cancelar edición")),
-        h("p", { className: "cj-hint", style: { margin: "6px 0 14px" } }, "Salidas de dinero de la caja (en efectivo). Indica si el importe ya lleva IVA o hay que sumarlo: el panel separa base e IVA."),
+        h("p", { className: "cj-hint", style: { margin: "6px 0 14px" } }, "Salidas de dinero de la caja (en efectivo). Se apunta el importe total que se paga."),
         h("div", { className: "cj-sec" },
           h("span", { className: "cj-eyebrow" }, "Gasto"),
           h("div", { className: "cj-grid2" },
@@ -576,10 +543,8 @@
           h("datalist", { id: "caja-g-proveedores" }, proveedores.map((c) => h("option", { key: c, value: c })))),
         h("div", { className: "cj-sec" },
           h("span", { className: "cj-eyebrow" }, "Importe"),
-          h("div", { className: "cj-grid2" },
-            Campo({ etiqueta: "Importe", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value })) }) }),
-            h(IvaControl, { iva: f.iva_rate, incluye: f.incluye_iva, onIva: (v) => setF((a) => ({ ...a, iva_rate: v })), onIncluye: (v) => setF((a) => ({ ...a, incluye_iva: v })) })),
-          h(Desglose, { calc })),
+          h("div", { style: { maxWidth: 360 } },
+            Campo({ etiqueta: "Importe (total)", children: h(InputEuro, { grande: true, value: f.importe, etiqueta: "Importe", onChange: (e) => setF((a) => ({ ...a, importe: e.target.value })) }) }))),
         h("div", { className: "cj-sec" },
           h("span", { className: "cj-eyebrow" }, "Detalles"),
           h("div", { className: "cj-grid2" },
@@ -591,9 +556,7 @@
       h("section", { className: "cj-card" },
         h("div", { className: "cj-between", style: { marginBottom: 16 } },
           h("div", { className: "cj-kpi" },
-            h("div", null, h("div", { className: "cj-hint" }, "Gastado en el mes"), h("div", { className: "n" }, eurC(suma("total_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} gasto(s)`)),
-            h("div", null, h("div", { className: "cj-hint" }, "Base imponible"), h("div", { className: "n" }, eurC(suma("base_cents")))),
-            h("div", null, h("div", { className: "cj-hint" }, "IVA soportado"), h("div", { className: "n" }, eurC(suma("iva_cents"))))),
+            h("div", null, h("div", { className: "cj-hint" }, "Gastado en el mes"), h("div", { className: "n" }, eurC(suma("total_cents"))), h("div", { className: "cj-hint" }, `${delMes.length} gasto(s)`))),
           h(BarraMes, { month, setMonth })),
         cats.length > 0 && h("div", { style: { display: "grid", gap: 8, margin: "0 0 18px" } },
           h("span", { className: "cj-eyebrow" }, "Por categoría"),
@@ -606,11 +569,11 @@
   }
 
   /* ---------- balance (caja de efectivo) ---------- */
-  // Movimientos de la caja en céntimos: entradas (cobros) y salidas (gastos), con su IVA.
+  // Movimientos de la caja en céntimos: entradas (cobros) y salidas (gastos), siempre importes totales.
   function movimientos(pagosCaja, gastos) {
     const m = [];
-    for (const c of pagosCaja) if (c.estado === "cobrado" && c.importe_cents > 0) m.push({ fecha: c.fecha, tipo: "in", cents: c.importe_cents, iva: c.iva_cents || 0, cat: catFromConcept(c.concepto), vend: c.vendedor || "Sin indicar" });
-    for (const g of gastos) if (g.estado === "pagado") m.push({ fecha: g.fecha, tipo: "out", cents: g.total_cents, iva: g.iva_cents || 0, cat: g.categoria });
+    for (const c of pagosCaja) if (c.estado === "cobrado" && c.importe_cents > 0) m.push({ fecha: c.fecha, tipo: "in", cents: c.importe_cents, cat: catFromConcept(c.concepto), vend: c.vendedor || "Sin indicar" });
+    for (const g of gastos) if (g.estado === "pagado") m.push({ fecha: g.fecha, tipo: "out", cents: g.total_cents, cat: g.categoria });
     return m;
   }
 
@@ -626,13 +589,13 @@
     const meses = [];
     for (let i = 1; i <= 12; i++) {
       const ym = `${anio}-${String(i).padStart(2, "0")}`;
-      let ent = 0, sal = 0, ivaRep = 0, ivaSop = 0;
+      let ent = 0, sal = 0;
       for (const m of validos) {
         if (m.fecha.slice(0, 7) !== ym) continue;
-        if (m.tipo === "in") { ent += m.cents; ivaRep += m.iva; } else { sal += m.cents; ivaSop += m.iva; }
+        if (m.tipo === "in") ent += m.cents; else sal += m.cents;
       }
       acum += ent - sal;
-      meses.push({ ym, ent, sal, neto: ent - sal, ivaRep, ivaSop, acum });
+      meses.push({ ym, ent, sal, neto: ent - sal, acum });
     }
     let actual = inicial;
     for (const m of validos) if (m.fecha <= hoy) actual += firmado(m);
@@ -653,10 +616,10 @@
 
   // Todos los cobros y gastos registrados (todas las fechas) en un solo CSV.
   function exportarTodo(caja) {
-    const cabecera = ["Fecha", "Tipo", "Concepto", "Cliente / proveedor", "Categoría", "Base", "IVA %", "IVA", "Total", "Vendedor", "Nº factura", "Sesiones incluidas", "Notas", "Registrado por", "Alta"];
+    const cabecera = ["Fecha", "Tipo", "Concepto", "Cliente / proveedor", "Categoría", "Importe", "Vendedor", "Nº factura", "Sesiones incluidas", "Notas", "Registrado por", "Alta"];
     const filas = [
-      ...caja.pagos.map((c) => [c.fecha, "Cobro", txt(c.concepto), txt(c.cliente_nombre), "", num(c.base_cents), Number(c.iva_rate), num(c.iva_cents), num(c.importe_cents), txt(c.vendedor), "", resumenServicios(c.servicios), txt(c.notas), txt(c.creado_por), (c.created_at || "").slice(0, 10)]),
-      ...caja.gastos.map((g) => [g.fecha, "Gasto", txt(g.concepto), txt(g.proveedor), txt(g.categoria), num(g.base_cents), Number(g.iva_rate), num(g.iva_cents), num(g.total_cents), "", txt(g.factura), "", txt(g.notas), txt(g.creado_por), (g.created_at || "").slice(0, 10)])
+      ...caja.pagos.map((c) => [c.fecha, "Cobro", txt(c.concepto), txt(c.cliente_nombre), "", num(c.importe_cents), txt(c.vendedor), "", resumenServicios(c.servicios), txt(c.notas), txt(c.creado_por), (c.created_at || "").slice(0, 10)]),
+      ...caja.gastos.map((g) => [g.fecha, "Gasto", txt(g.concepto), txt(g.proveedor), txt(g.categoria), num(g.total_cents), "", txt(g.factura), "", txt(g.notas), txt(g.creado_por), (g.created_at || "").slice(0, 10)])
     ].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
     descargarCSV(`caja-axis-${todayISO()}.csv`, [cabecera, ...filas]);
   }
@@ -672,7 +635,7 @@
     const movs = useMemo(() => movimientos(caja.pagos, caja.gastos), [caja.pagos, caja.gastos]);
     const b = useMemo(() => calcularBalance(movs, caja.config, anio, hoy), [movs, caja.config, anio, hoy]);
     const sel = b.meses.find((m) => m.ym === month) || b.meses[0];
-    const total = b.meses.reduce((a, m) => ({ ent: a.ent + m.ent, sal: a.sal + m.sal, ivaRep: a.ivaRep + m.ivaRep, ivaSop: a.ivaSop + m.ivaSop }), { ent: 0, sal: 0, ivaRep: 0, ivaSop: 0 });
+    const total = b.meses.reduce((a, m) => ({ ent: a.ent + m.ent, sal: a.sal + m.sal }), { ent: 0, sal: 0 });
     const max = Math.max(1, ...b.meses.map((m) => Math.max(m.ent, m.sal)));
     const delMes = movs.filter((m) => m.fecha.slice(0, 7) === sel.ym && m.fecha >= (b.desde || "0000"));
     const agrupar = (tipo, clave) => {
@@ -694,24 +657,23 @@
       try { await caja.api.guardarConfig({ efectivo: cents, fecha: cfg.fecha }); setMsg("Efectivo inicial guardado."); } catch (e) { setMsg("No se ha guardado: " + (e.message || e)); }
     };
     const exportar = () => descargarCSV(`balance-caja-${anio}.csv`, [
-      ["Mes", "Entradas", "Salidas", "Neto", "IVA repercutido", "IVA soportado", "Acumulado"],
-      ...b.meses.map((m) => [m.ym, num(m.ent), num(m.sal), num(m.neto), num(m.ivaRep), num(m.ivaSop), num(m.acum)]),
-      ["Total " + anio, num(total.ent), num(total.sal), num(total.ent - total.sal), num(total.ivaRep), num(total.ivaSop), ""]]);
+      ["Mes", "Entradas", "Salidas", "Neto", "Acumulado"],
+      ...b.meses.map((m) => [m.ym, num(m.ent), num(m.sal), num(m.neto), num(m.acum)]),
+      ["Total " + anio, num(total.ent), num(total.sal), num(total.ent - total.sal), ""]]);
     const exportarMov = () => descargarCSV(`movimientos-caja-${anio}.csv`, [
-      ["Fecha", "Tipo", "Concepto", "Cliente / proveedor", "Categoría", "Base", "IVA %", "IVA", "Total", "Vendedor", "Factura", "Notas"],
-      ...[...caja.pagos.filter((c) => c.fecha.startsWith(String(anio))).map((c) => [c.fecha, "Cobro", c.concepto, c.cliente_nombre, "", num(c.base_cents), Number(c.iva_rate), num(c.iva_cents), num(c.importe_cents), c.vendedor, "", c.notas]),
-        ...caja.gastos.filter((g) => g.fecha.startsWith(String(anio))).map((g) => [g.fecha, "Gasto", g.concepto, g.proveedor, g.categoria, num(g.base_cents), Number(g.iva_rate), num(g.iva_cents), num(g.total_cents), "", g.factura, g.notas])].sort((a, c) => a[0].localeCompare(c[0]))]);
+      ["Fecha", "Tipo", "Concepto", "Cliente / proveedor", "Categoría", "Importe", "Vendedor", "Factura", "Notas"],
+      ...[...caja.pagos.filter((c) => c.fecha.startsWith(String(anio))).map((c) => [c.fecha, "Cobro", c.concepto, c.cliente_nombre, "", num(c.importe_cents), c.vendedor, "", c.notas]),
+        ...caja.gastos.filter((g) => g.fecha.startsWith(String(anio))).map((g) => [g.fecha, "Gasto", g.concepto, g.proveedor, g.categoria, num(g.total_cents), "", g.factura, g.notas])].sort((a, c) => a[0].localeCompare(c[0]))]);
     const th = { padding: "6px 8px", borderBottom: `2px solid ${INK}`, fontSize: 12, color: MUTED, textAlign: "right", whiteSpace: "nowrap" };
     const td = { padding: "7px 8px", borderBottom: `1px solid ${SOFT}`, fontSize: 13, textAlign: "right", whiteSpace: "nowrap" };
     const col = (v) => (v > 0 ? BAR_IN : v < 0 ? BAD : INK);
-    const ivaNeto = sel.ivaRep - sel.ivaSop;
 
     return h("div", { className: "cj-stack" },
       h("div", { style: { display: "flex", gap: 12, flexWrap: "wrap" } },
         tarjeta("Efectivo en caja ahora", eurC(b.actual), col(b.actual), `a ${hoy}`),
         tarjeta(`Entradas · ${MESES[Number(sel.ym.slice(5)) - 1]}`, eurC(sel.ent), BAR_IN, "cobros del mes"),
         tarjeta(`Salidas · ${MESES[Number(sel.ym.slice(5)) - 1]}`, eurC(sel.sal), sel.sal ? BAR_OUT : INK, "gastos del mes"),
-        tarjeta("IVA del mes", eurC(ivaNeto), INK, `repercutido ${eurC(sel.ivaRep)} − soportado ${eurC(sel.ivaSop)}`)),
+        tarjeta(`Neto · ${MESES[Number(sel.ym.slice(5)) - 1]}`, eurC(sel.neto), col(sel.neto), "entradas − salidas")),
       h("section", { style: box },
         h("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 } },
           h("button", { className: "axis-btn ghost", onClick: () => setMonth(`${anio - 1}-${month.slice(5)}`), "aria-label": "Año anterior" }, "←"),
@@ -726,31 +688,29 @@
             h("div", { style: { width: "36%", height: `${m.sal / max * 100}%`, minHeight: m.sal ? 2 : 0, background: BAR_OUT, borderRadius: "3px 3px 0 0" } })))),
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 4, fontSize: 11, color: MUTED, textAlign: "center", marginBottom: 12 } }, MESES.map((n) => h("span", { key: n }, n))),
         h("div", { style: { fontSize: 12, color: MUTED, marginBottom: 10 } }, h("span", { style: { color: BAR_IN } }, "■ "), "Entradas  ", h("span", { style: { color: BAR_OUT } }, "■ "), "Salidas"),
-        h("div", { style: { overflowX: "auto" } }, h("table", { style: { borderCollapse: "collapse", width: "100%", minWidth: 700 } },
-          h("thead", null, h("tr", null, h("th", { style: { ...th, textAlign: "left" } }, "Mes"), ["Entradas", "Salidas", "Neto del mes", "IVA repercutido", "IVA soportado", "Efectivo acumulado"].map((t) => h("th", { key: t, style: th }, t)))),
+        h("div", { style: { overflowX: "auto" } }, h("table", { style: { borderCollapse: "collapse", width: "100%", minWidth: 560 } },
+          h("thead", null, h("tr", null, h("th", { style: { ...th, textAlign: "left" } }, "Mes"), ["Entradas", "Salidas", "Neto del mes", "Efectivo acumulado"].map((t) => h("th", { key: t, style: th }, t)))),
           h("tbody", null,
-            h("tr", null, h("td", { style: { ...td, textAlign: "left", color: MUTED } }, `Efectivo al empezar ${anio}`), h("td", { style: td }), h("td", { style: td }), h("td", { style: td }), h("td", { style: td }), h("td", { style: td }), h("td", { style: { ...td, color: MUTED } }, eurC(b.apertura))),
+            h("tr", null, h("td", { style: { ...td, textAlign: "left", color: MUTED } }, `Efectivo al empezar ${anio}`), h("td", { style: td }), h("td", { style: td }), h("td", { style: td }), h("td", { style: { ...td, color: MUTED } }, eurC(b.apertura))),
             b.meses.map((m, i) => h("tr", { key: m.ym, onClick: () => setMonth(m.ym), style: { cursor: "pointer", background: m.ym === sel.ym ? SOFT : "transparent", opacity: m.ym > hoy.slice(0, 7) && !m.ent && !m.sal ? 0.5 : 1 } },
               h("td", { style: { ...td, textAlign: "left", fontWeight: m.ym === sel.ym ? 700 : 400 } }, MESES[i]),
               h("td", { style: { ...td, color: m.ent ? BAR_IN : MUTED } }, eurC(m.ent)),
               h("td", { style: { ...td, color: m.sal ? BAR_OUT : MUTED } }, eurC(m.sal)),
               h("td", { style: { ...td, fontWeight: 600, color: col(m.neto) } }, eurC(m.neto)),
-              h("td", { style: { ...td, color: MUTED } }, eurC(m.ivaRep)),
-              h("td", { style: { ...td, color: MUTED } }, eurC(m.ivaSop)),
               h("td", { style: { ...td, fontWeight: 700, color: col(m.acum) } }, eurC(m.acum)))),
             h("tr", null, h("td", { style: { ...td, textAlign: "left", fontWeight: 700, borderTop: `2px solid ${INK}` } }, `Total ${anio}`),
               h("td", { style: { ...td, fontWeight: 700, borderTop: `2px solid ${INK}` } }, eurC(total.ent)), h("td", { style: { ...td, fontWeight: 700, borderTop: `2px solid ${INK}` } }, eurC(total.sal)),
               h("td", { style: { ...td, fontWeight: 700, borderTop: `2px solid ${INK}`, color: col(total.ent - total.sal) } }, eurC(total.ent - total.sal)),
-              h("td", { style: { ...td, fontWeight: 700, borderTop: `2px solid ${INK}` } }, eurC(total.ivaRep)), h("td", { style: { ...td, fontWeight: 700, borderTop: `2px solid ${INK}` } }, eurC(total.ivaSop)), h("td", { style: { ...td, borderTop: `2px solid ${INK}` } }))))),
+              h("td", { style: { ...td, borderTop: `2px solid ${INK}` } }))))),
         b.desde && h("p", { style: { margin: "8px 0 0", fontSize: 12, color: MUTED } }, `Se cuenta desde el ${b.desde}: lo anterior a esa fecha se ignora.`)),
       h("section", { style: box },
         h("h3", { style: { margin: "0 0 4px", fontSize: 16 } }, `${MESES[Number(sel.ym.slice(5)) - 1]} ${anio}: `, h("span", { style: { color: col(sel.neto) } }, eurC(sel.neto)), h("span", { style: { fontSize: 13, fontWeight: 400, color: MUTED } }, `  (entradas ${eurC(sel.ent)} − salidas ${eurC(sel.sal)})`)),
-        h("p", { style: { margin: "0 0 12px", fontSize: 12, color: MUTED } }, `Efectivo acumulado a final de mes: ${eurC(sel.acum)}. IVA repercutido ${eurC(sel.ivaRep)} − soportado ${eurC(sel.ivaSop)} = ${eurC(ivaNeto)} ${ivaNeto >= 0 ? "a ingresar" : "a compensar"}.`),
+        h("p", { style: { margin: "0 0 12px", fontSize: 12, color: MUTED } }, `Efectivo acumulado a final de mes: ${eurC(sel.acum)}.`),
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 } },
           bloque("Entradas por producto", agrupar("in", (m) => m.cat), BAR_IN),
           bloque("Entradas por vendedor", agrupar("in", (m) => m.vend), BAR_IN),
           bloque("Salidas por categoría", agrupar("out", (m) => m.cat), BAR_OUT)),
-        h("p", { style: { margin: "12px 0 0", fontSize: 12, color: MUTED } }, "Es una caja de efectivo: cada cobro y cada gasto se cuenta en su fecha. El IVA es el que indicas al apuntar cada importe.")),
+        h("p", { style: { margin: "12px 0 0", fontSize: 12, color: MUTED } }, "Es una caja de efectivo: cada cobro y cada gasto se cuenta en su fecha, por su importe total.")),
       caja.esAdmin && h("details", { style: box },
         h("summary", { style: { cursor: "pointer", fontWeight: 600, fontSize: 14 } }, "Efectivo inicial de la caja"),
         h("p", { style: { margin: "10px 0", fontSize: 13, color: MUTED } }, "Con cuánto efectivo empieza a contar el acumulado. Si indicas una fecha, solo se cuentan los movimientos desde ese día (todo lo anterior se ignora)."),
@@ -796,7 +756,7 @@
     return h(CajaTab, { caja, month, setMonth });
   }
 
-  window.CajaAxis = { calcIva, movimientos, calcularBalance, CajaTab, SelectorLista };
+  window.CajaAxis = { movimientos, calcularBalance, CajaTab, SelectorLista };
   const raiz = document.getElementById("root");
   if (raiz) ReactDOM.createRoot(raiz).render(h(App));
 })();
